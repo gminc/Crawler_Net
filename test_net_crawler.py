@@ -124,7 +124,10 @@ def test_origin_missing_is_marked():
 
 PROMO_HTML = """
 <div class="saleGroup_title"><span class="saleGroup_title_name">嬰幼兒夏日內搭褲</span>
-<span class="saleGroup_title_price">任選 3件 249</span></div>
+<span class="saleGroup_title_price">
+任選 3件
+249
+</span></div>
 <td><a class="hover-box" href="https://www.net-fashion.net/product/1"><img alt="嬰幼兒針織長褲" src="/img/1.jpg"></a></td>
 <td><a class="hover-box" href="https://www.net-fashion.net/product/3"><img alt="嬰幼兒包屁衣" src="/img/3.jpg"></a></td>
 <script>var app = {data: {pagination: {"previous":null,"current":1,"pageCount":2,"total":3,"next":2}}}</script>

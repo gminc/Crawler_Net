@@ -167,8 +167,8 @@ def parse_promotion_page(html, page_url):
     """活動頁：回傳 (產品清單, 總頁數或 None, 活動名稱)。總頁數寫在頁面內的 Vue 資料裡。"""
     soup = BeautifulSoup(html, 'html.parser')
     m = re.search(r'"pageCount"\s*:\s*(\d+)', html)
-    title = ' '.join(_text(soup.select_one(sel)) for sel in
-                     ('.saleGroup_title_name', '.saleGroup_title_price')).strip()
+    title = ' '.join(' '.join(_text(soup.select_one(sel)) for sel in
+                              ('.saleGroup_title_name', '.saleGroup_title_price')).split())
     return (_product_links(soup.select('a.hover-box[href*="/product/"]'), page_url),
             int(m.group(1)) if m else None, title)
 
