@@ -94,6 +94,22 @@ def test_robots_disallow(client):
         client.get(nc.BASE_URL + '/member/login')
 
 
+def test_robots_redirected_to_home_means_no_rules(tmp_path, monkeypatch):
+    session = FakeSession({**PAGES, '/robots.txt': (200, 'Disallow: /')})
+    original_get = session.get
+
+    def redirecting_get(url, timeout=None):
+        r = original_get(url, timeout)
+        if url.endswith('/robots.txt'):
+            r.url = nc.BASE_URL + '/'  # 模擬被 302 導回首頁
+        return r
+
+    session.get = redirecting_get
+    monkeypatch.setattr(nc.requests, 'Session', lambda: session)
+    client = nc.PoliteClient(delay=0, jitter=0, cache_dir=tmp_path)
+    client.get(nc.BASE_URL + '/category/9')  # 不應被當成 Disallow
+
+
 def test_request_cap(client):
     client.max_requests = client.requests_made + 1
     client.get(nc.BASE_URL + '/category/9')

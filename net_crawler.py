@@ -65,7 +65,9 @@ class PoliteClient:
             self.robots = robotparser.RobotFileParser()
             try:
                 r = self._request(urljoin(BASE_URL, '/robots.txt'))
-                self.robots.parse(r.text.splitlines() if r.ok else [])
+                # 網站沒有 robots.txt 時會被導回首頁，此時視為沒有限制
+                is_robots = r.ok and urlparse(r.url).path.endswith('/robots.txt')
+                self.robots.parse(r.text.splitlines() if is_robots else [])
             except requests.RequestException as e:
                 log.warning('讀不到 robots.txt（%s），視為全部允許', e)
                 self.robots.parse([])
