@@ -120,3 +120,39 @@ def test_request_cap(client):
 def test_origin_missing_is_marked():
     item = nc.parse_product_page('<div class="product_detail_Right_title">褲</div>')
     assert item['origin'] == nc.UNKNOWN_ORIGIN
+
+
+PROMO_HTML = """
+<div class="saleGroup_title"><span class="saleGroup_title_name">嬰幼兒夏日內搭褲</span>
+<span class="saleGroup_title_price">任選 3件 249</span></div>
+<td><a class="hover-box" href="https://www.net-fashion.net/product/1"><img alt="嬰幼兒針織長褲" src="/img/1.jpg"></a></td>
+<td><a class="hover-box" href="https://www.net-fashion.net/product/3"><img alt="嬰幼兒包屁衣" src="/img/3.jpg"></a></td>
+<script>var app = {data: {pagination: {"previous":null,"current":1,"pageCount":2,"total":3,"next":2}}}</script>
+"""
+PROMO_PAGE2_HTML = """
+<td><a class="hover-box" href="https://www.net-fashion.net/product/2"><img alt="嬰幼兒內搭褲" src="/img/2.jpg"></a></td>
+"""
+
+
+@pytest.mark.parametrize('target, expected', [
+    ('1662', ('category', '1662')),
+    ('promotion/658', ('promotion', '658')),
+    ('https://www.net-fashion.net/promotion/1490', ('promotion', '1490')),
+    ('https://www.net-fashion.net/promotion?id=658&page=2', ('promotion', '658')),
+    ('https://www.net-fashion.net/category/2451/3', ('category', '2451')),
+])
+def test_parse_target(target, expected):
+    assert nc.parse_target(target) == expected
+
+
+def test_promotion_pages_and_name_prefilter(client):
+    client.session.pages = {**PAGES, '/promotion/7': (200, PROMO_HTML),
+                            '/promotion?id=7&page=2': (200, PROMO_PAGE2_HTML)}
+    rows = []
+    nc.crawl(client, ['promotion/7'], 20, ['褲'], ['中國'], rows)
+    assert [r['name'] for r in rows] == ['嬰幼兒針織長褲']
+    assert rows[0]['promo'] == '嬰幼兒夏日內搭褲 任選 3件 249'
+    assert rows[0]['source'] == 'promotion/7'
+    assert '/promotion?id=7&page=2' in client.session.calls  # 有翻到第 2 頁
+    assert '/product/2' in client.session.calls               # 第 2 頁的褲子有抓（再被產地排除）
+    assert '/product/3' not in client.session.calls           # 包屁衣在列表就被篩掉，不抓產品頁

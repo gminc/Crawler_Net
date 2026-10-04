@@ -1,6 +1,6 @@
 """NET 購物網站產品爬蟲（禮貌版）
 
-爬取分類頁下的產品資訊（品名、價格、產地、連結、圖片），輸出 CSV。
+爬取分類頁或活動頁下的產品資訊（品名、價格、產地、活動、連結、圖片），輸出 CSV。
 
 為了避免再被對方封鎖，這版做了以下限制：
 - 遵守 robots.txt（被禁止的網址不抓）
@@ -16,6 +16,9 @@
 
     # 爬分類 1662，只留品名含「褲」、排除中國製
     python net_crawler.py crawl 1662 --name-keyword 褲 --exclude-origin 中國 大陸 China
+
+    # 爬活動頁（可直接貼網址）
+    python net_crawler.py crawl https://www.net-fashion.net/promotion/1490 promotion/658
 """
 
 import argparse
@@ -138,20 +141,36 @@ def _text(node):
     return node.get_text(' ', strip=True) if node else ''
 
 
-def parse_category_page(html, page_url):
-    """回傳 (產品清單 [(link, img)], 最後頁碼或 None)。"""
-    soup = BeautifulSoup(html, 'html.parser')
+def _product_links(anchors, page_url):
+    """回傳 [(link, img, 品名)]；品名取自圖片 alt，可在抓產品頁前先篩選。"""
     products = []
-    for a in soup.select('.main_img > a'):
+    for a in anchors:
         link = a.get('href')
         if not link:
             continue
         img_tag = a.find('img')
         img = (img_tag.get('src') or img_tag.get('data-src')) if img_tag else ''
-        products.append((urljoin(page_url, link), urljoin(page_url, img) if img else ''))
+        name = (img_tag.get('alt') or '').strip() if img_tag else ''
+        products.append((urljoin(page_url, link), urljoin(page_url, img) if img else '', name))
+    return products
 
+
+def parse_category_page(html, page_url):
+    """分類頁：回傳 (產品清單, 最後頁碼或 None)。"""
+    soup = BeautifulSoup(html, 'html.parser')
     page_numbers = [int(a.text) for a in soup.select('.yahoo a') if a.text.strip().isdigit()]
-    return products, (max(page_numbers) if page_numbers else None)
+    return (_product_links(soup.select('.main_img > a'), page_url),
+            max(page_numbers) if page_numbers else None)
+
+
+def parse_promotion_page(html, page_url):
+    """活動頁：回傳 (產品清單, 總頁數或 None, 活動名稱)。總頁數寫在頁面內的 Vue 資料裡。"""
+    soup = BeautifulSoup(html, 'html.parser')
+    m = re.search(r'"pageCount"\s*:\s*(\d+)', html)
+    title = ' '.join(_text(soup.select_one(sel)) for sel in
+                     ('.saleGroup_title_name', '.saleGroup_title_price')).strip()
+    return (_product_links(soup.select('a.hover-box[href*="/product/"]'), page_url),
+            int(m.group(1)) if m else None, title)
 
 
 def parse_origin(soup):
@@ -172,54 +191,82 @@ def parse_product_page(html):
 
 # ---------- 流程 ----------
 
-def category_url(category, page=1):
-    return f'{BASE_URL}/category/{category}' + (f'/{page}' if page > 1 else '')
+def parse_target(target):
+    """'1662'、'category/1662'、'promotion/658' 或完整網址 → ('category'|'promotion', 代號)。"""
+    m = re.search(r'(category|promotion)(?:/|\?id=)(\d+)', target)
+    if m:
+        return m.group(1), m.group(2)
+    if target.isdigit():
+        return 'category', target
+    raise ValueError(f'看不懂的目標：{target}（請給分類代號、category/代號、promotion/代號或網址）')
 
 
-def collect_product_links(client, category, max_pages):
+def page_url(kind, target_id, page=1):
+    if kind == 'promotion':
+        return (f'{BASE_URL}/promotion/{target_id}' if page == 1
+                else f'{BASE_URL}/promotion?id={target_id}&page={page}')
+    return f'{BASE_URL}/category/{target_id}' + (f'/{page}' if page > 1 else '')
+
+
+def parse_listing(kind, html, url):
+    if kind == 'promotion':
+        return parse_promotion_page(html, url)
+    return (*parse_category_page(html, url), '')
+
+
+def collect_product_links(client, kind, target_id, max_pages):
+    """回傳 ([(link, img, 品名)], 活動名稱)。"""
     links = {}
-    first_url, html = client.get(category_url(category))
+    first_url, html = client.get(page_url(kind, target_id))
     if urlparse(first_url).path in ('', '/'):
-        log.warning('分類 %s 被導回首頁，可能已不存在', category)
-        return []
-    products, last_page = parse_category_page(html, first_url)
-    links.update(dict(products))
+        log.warning('%s/%s 被導回首頁，可能已不存在', kind, target_id)
+        return [], ''
+    products, last_page, title = parse_listing(kind, html, first_url)
+    links.update({p[0]: p for p in products})
     last_page = min(last_page or 1, max_pages)
-    log.info('分類 %s：共 %d 頁', category, last_page)
+    log.info('%s/%s %s：共 %d 頁', kind, target_id, title, last_page)
 
     for page in range(2, last_page + 1):
-        url, html = client.get(category_url(category, page))
-        products, _ = parse_category_page(html, url)
-        new = {k: v for k, v in products if k not in links}
+        url, html = client.get(page_url(kind, target_id, page))
+        products = parse_listing(kind, html, url)[0]
+        new = {p[0]: p for p in products if p[0] not in links}
         if not new:
             break
         links.update(new)
         log.info('  第 %d 頁：+%d 件', page, len(new))
-    return list(links.items())
+    return list(links.values()), title
+
+
+def name_matches(name, name_keywords):
+    return not name_keywords or any(k.lower() in name.lower() for k in name_keywords)
 
 
 def matches(item, name_keywords, exclude_origins):
-    if name_keywords and not any(k.lower() in item['name'].lower() for k in name_keywords):
+    if not name_matches(item['name'], name_keywords):
         return False
     if exclude_origins and any(x.lower() in item['origin'].lower() for x in exclude_origins):
         return False
     return True
 
 
-def crawl(client, categories, max_pages, name_keywords, exclude_origins, rows):
+def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows):
     """結果直接 append 到 rows，中途被擋時已抓到的資料不會遺失。"""
     seen = set()
-    for category in categories:
-        for link, img in collect_product_links(client, category, max_pages):
+    for target in targets:
+        kind, target_id = parse_target(target)
+        products, promo = collect_product_links(client, kind, target_id, max_pages)
+        for link, img, list_name in products:
             if link in seen:
                 continue
             seen.add(link)
+            if list_name and not name_matches(list_name, name_keywords):
+                continue  # 列表上的品名就不符合，不必抓產品頁
             _, html = client.get(link, use_cache=True)
             item = parse_product_page(html)
             if not item['name']:
                 log.warning('解析不到品名（網站版面可能改了）：%s', link)
                 continue
-            item.update(category=category, link=link, img=img)
+            item.update(source=f'{kind}/{target_id}', promo=promo, link=link, img=img)
             if matches(item, name_keywords, exclude_origins):
                 rows.append(item)
                 log.info('  ✓ %s｜%s｜%s', item['name'], item['price'], item['origin'])
@@ -237,7 +284,7 @@ def discover(client, keywords):
 
 
 def write_csv(rows, path):
-    fields = ['name', 'price', 'origin', 'category', 'link', 'img']
+    fields = ['name', 'price', 'origin', 'promo', 'source', 'link', 'img']
     with open(path, 'w', newline='', encoding='utf-8-sig') as f:  # utf-8-sig：Excel 開啟不亂碼
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -255,8 +302,9 @@ def main(argv=None):
     d = sub.add_parser('discover', help='從首頁列出分類代號')
     d.add_argument('--keyword', nargs='*', default=[], help='分類名稱關鍵字，例如 嬰 寶寶 童')
 
-    c = sub.add_parser('crawl', help='爬指定分類的產品')
-    c.add_argument('categories', nargs='+', help='分類代號，例如 1662')
+    c = sub.add_parser('crawl', help='爬指定分類或活動頁的產品')
+    c.add_argument('targets', nargs='+',
+                   help='分類代號（1662）、promotion/658，或直接貼分類／活動頁網址')
     c.add_argument('--max-pages', type=int, default=20)
     c.add_argument('--name-keyword', nargs='*', default=[], help='品名需包含任一關鍵字，例如 褲')
     c.add_argument('--exclude-origin', nargs='*', default=[], help='排除的產地，例如 中國 大陸 China')
@@ -277,7 +325,7 @@ def main(argv=None):
 
     rows, status = [], 0
     try:
-        crawl(client, args.categories, args.max_pages,
+        crawl(client, args.targets, args.max_pages,
               args.name_keyword, args.exclude_origin, rows)
     except BlockedError as e:
         log.error('%s（已抓到的 %d 筆仍會寫出，快取保留，之後重跑可接續）', e, len(rows))

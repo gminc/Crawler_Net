@@ -1,5 +1,5 @@
 # Crawler_Net
-爬取 NET 購物網站 (https://www.net-fashion.net) 分類下的產品資訊（品名、價格、產地、連結、圖片），產出 CSV。
+爬取 NET 購物網站 (https://www.net-fashion.net) 分類頁或活動頁的產品資訊（品名、價格、產地、活動、連結、圖片），產出 CSV。
 
 ## 安裝
 ```
@@ -15,6 +15,12 @@ python net_crawler.py discover --keyword 嬰 寶寶 BABY 童
 python net_crawler.py crawl 1662 --name-keyword 褲 --exclude-origin 中國 大陸 China -o baby_pants.csv
 ```
 - 可一次給多個分類代號：`crawl 1662 1663`
+- 活動頁（任選 N 件、零碼出清等）也可以爬，直接貼網址或寫 `promotion/代號`：
+  ```
+  python net_crawler.py crawl https://www.net-fashion.net/promotion/1490 promotion/658
+  ```
+  CSV 的 `promo` 欄會寫活動名稱（例如「嬰幼兒夏日內搭褲 任選 3件 249」），`price` 是商品頁的單件售價
+- 有給 `--name-keyword` 時，列表上品名就不符合的商品不會去抓商品頁，省請求
 - 產地沒標示的商品會保留，產地欄寫「未標示」，請自行確認
 - CSV 用 utf-8-sig 編碼，Excel 直接開不會亂碼
 
