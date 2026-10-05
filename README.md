@@ -20,6 +20,9 @@ python net_crawler.py crawl 1662 --name-keyword 褲 --exclude-origin 中國 大�
   python net_crawler.py crawl https://www.net-fashion.net/promotion/1490 promotion/658
   ```
   CSV 的 `promo` 欄會寫活動名稱（例如「嬰幼兒夏日內搭褲 任選 3件 249」），`price` 是商品頁的單件售價
+- 加 `--in-stock-only` 只留還有尺寸有貨的商品；CSV 的 `color` 是顏色、`sizes` 是有庫存的尺寸（例如 `S/M/L`）
+  - 活動頁的尺寸庫存直接取自活動頁內嵌資料，是當下的庫存；分類頁的庫存來自產品頁，若快取過舊可加 `--refresh` 重抓
+- 價格欄位：`price` 是商品頁顯示的售價（有活動時已是活動價）、`original_price` 是原價、`promo_price` 是活動頁標示的活動價
 - 有給 `--name-keyword` 時，列表上品名就不符合的商品不會去抓商品頁，省請求
 - 產地沒標示的商品會保留，產地欄寫「未標示」，請自行確認
 - CSV 用 utf-8-sig 編碼，Excel 直接開不會亂碼

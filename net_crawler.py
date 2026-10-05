@@ -24,6 +24,7 @@
 import argparse
 import csv
 import hashlib
+import json
 import logging
 import random
 import re
@@ -50,12 +51,13 @@ class BlockedError(RuntimeError):
 
 class PoliteClient:
     def __init__(self, delay=3.0, jitter=3.0, max_requests=300,
-                 cache_dir='cache', respect_robots=True, max_retries=3):
+                 cache_dir='cache', respect_robots=True, max_retries=3, refresh=False):
         self.delay = delay
         self.jitter = jitter
         self.max_requests = max_requests
         self.max_retries = max_retries
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.refresh = refresh  # True：不讀快取（庫存要最新時用），但仍會更新快取
         self.requests_made = 0
         self._last_request = 0.0
         self.session = requests.Session()
@@ -96,7 +98,7 @@ class PoliteClient:
 
     def get(self, url, use_cache=False):
         """回傳 (最終網址, HTML)。use_cache=True 時優先讀本機快取。"""
-        if use_cache and self.cache_dir:
+        if use_cache and self.cache_dir and not self.refresh:
             path = self._cache_path(url)
             if path.exists():
                 return url, path.read_text(encoding='utf-8')
@@ -142,7 +144,7 @@ def _text(node):
 
 
 def _product_links(anchors, page_url):
-    """回傳 [(link, img, 品名)]；品名取自圖片 alt，可在抓產品頁前先篩選。"""
+    """回傳 [(link, img, 品名, 額外欄位)]；品名取自圖片 alt，可在抓產品頁前先篩選。"""
     products = []
     for a in anchors:
         link = a.get('href')
@@ -151,7 +153,7 @@ def _product_links(anchors, page_url):
         img_tag = a.find('img')
         img = (img_tag.get('src') or img_tag.get('data-src')) if img_tag else ''
         name = (img_tag.get('alt') or '').strip() if img_tag else ''
-        products.append((urljoin(page_url, link), urljoin(page_url, img) if img else '', name))
+        products.append((urljoin(page_url, link), urljoin(page_url, img) if img else '', name, {}))
     return products
 
 
@@ -163,14 +165,41 @@ def parse_category_page(html, page_url):
             max(page_numbers) if page_numbers else None)
 
 
+def _in_stock(sizes):
+    """[(尺寸, 庫存數)] → 有庫存的尺寸，以「/」串接。"""
+    return '/'.join(size for size, qty in sizes if int(qty or 0) > 0)
+
+
+def parse_promotion_products(html):
+    """活動頁內嵌的 Vue 資料 promotionProducts：每個顏色一筆，含各尺寸庫存與活動價。"""
+    i = html.find('promotionProducts:')
+    if i < 0:
+        return []
+    try:
+        data, _ = json.JSONDecoder().raw_decode(html[html.index('[', i):])
+    except ValueError:
+        return []
+    products = []
+    for p in data:
+        img = (p.get('image400') or {}).get('file_name', '')
+        products.append((f"{BASE_URL}/product/{p['id']}", img, p.get('name', ''), {
+            'color': p.get('color', ''),
+            'sizes': _in_stock((s.get('size', ''), s.get('quantity')) for s in p.get('sizes', [])),
+            'promo_price': str(p.get('promotion_price', '')),
+            'original_price': str(p.get('price', '')),
+        }))
+    return products
+
+
 def parse_promotion_page(html, page_url):
     """活動頁：回傳 (產品清單, 總頁數或 None, 活動名稱)。總頁數寫在頁面內的 Vue 資料裡。"""
     soup = BeautifulSoup(html, 'html.parser')
     m = re.search(r'"pageCount"\s*:\s*(\d+)', html)
     title = ' '.join(' '.join(_text(soup.select_one(sel)) for sel in
                               ('.saleGroup_title_name', '.saleGroup_title_price')).split())
-    return (_product_links(soup.select('a.hover-box[href*="/product/"]'), page_url),
-            int(m.group(1)) if m else None, title)
+    products = (parse_promotion_products(html)
+                or _product_links(soup.select('a.hover-box[href*="/product/"]'), page_url))
+    return products, int(m.group(1)) if m else None, title
 
 
 def parse_origin(soup):
@@ -186,7 +215,15 @@ def parse_product_page(html):
     soup = BeautifulSoup(html, 'html.parser')
     name = _text(soup.select_one('div.product_detail_Right_title'))
     price = _text(soup.select_one('div.product_priceR_real > b'))
-    return {'name': name, 'price': price, 'origin': parse_origin(soup)}
+    original_price = _text(soup.select_one('div.product_priceR_original'))
+    size_links = soup.select('.product_size a[quantity]')
+    return {
+        'name': name, 'price': price, 'original_price': original_price or price,
+        'origin': parse_origin(soup),
+        'color': _text(soup.select_one('.product_color_block.color_active .product_color_tag')),
+        # 頁面沒有尺寸區塊時為 None（未知），有區塊但全部沒貨時為 ''
+        'sizes': _in_stock((_text(a), a['quantity']) for a in size_links) if size_links else None,
+    }
 
 
 # ---------- 流程 ----------
@@ -249,13 +286,13 @@ def matches(item, name_keywords, exclude_origins):
     return True
 
 
-def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows):
+def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows, in_stock_only=False):
     """結果直接 append 到 rows，中途被擋時已抓到的資料不會遺失。"""
     seen = set()
     for target in targets:
         kind, target_id = parse_target(target)
         products, promo = collect_product_links(client, kind, target_id, max_pages)
-        for link, img, list_name in products:
+        for link, img, list_name, extra in products:
             if link in seen:
                 continue
             seen.add(link)
@@ -266,10 +303,13 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows):
             if not item['name']:
                 log.warning('解析不到品名（網站版面可能改了）：%s', link)
                 continue
+            item.update(extra)  # 活動頁資料是當下的庫存，比快取的產品頁新
             item.update(source=f'{kind}/{target_id}', promo=promo, link=link, img=img)
+            if in_stock_only and item['sizes'] == '':
+                continue
             if matches(item, name_keywords, exclude_origins):
                 rows.append(item)
-                log.info('  ✓ %s｜%s｜%s', item['name'], item['price'], item['origin'])
+                log.info('  ✓ %s｜%s｜%s｜%s', item['name'], item['color'], item['sizes'], item['origin'])
 
 
 def discover(client, keywords):
@@ -284,9 +324,10 @@ def discover(client, keywords):
 
 
 def write_csv(rows, path):
-    fields = ['name', 'price', 'origin', 'promo', 'source', 'link', 'img']
+    # price：商品頁顯示的售價（有活動時是活動價）；original_price：原價；promo_price：活動頁標示的活動價
+    fields = ['name', 'color', 'sizes', 'price', 'original_price', 'promo_price', 'origin', 'promo', 'source', 'link', 'img']
     with open(path, 'w', newline='', encoding='utf-8-sig') as f:  # utf-8-sig：Excel 開啟不亂碼
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, restval='')
         w.writeheader()
         w.writerows(rows)
 
@@ -297,6 +338,7 @@ def main(argv=None):
     p.add_argument('--jitter', type=float, default=3.0, help='額外隨機間隔上限秒數（預設 3）')
     p.add_argument('--max-requests', type=int, default=300, help='本次執行請求上限（預設 300）')
     p.add_argument('--cache-dir', default='cache', help='產品頁快取資料夾')
+    p.add_argument('--refresh', action='store_true', help='不讀快取，重抓產品頁（要最新庫存時用）')
     sub = p.add_subparsers(dest='cmd', required=True)
 
     d = sub.add_parser('discover', help='從首頁列出分類代號')
@@ -308,12 +350,14 @@ def main(argv=None):
     c.add_argument('--max-pages', type=int, default=20)
     c.add_argument('--name-keyword', nargs='*', default=[], help='品名需包含任一關鍵字，例如 褲')
     c.add_argument('--exclude-origin', nargs='*', default=[], help='排除的產地，例如 中國 大陸 China')
+    c.add_argument('--in-stock-only', action='store_true', help='只保留還有尺寸有庫存的商品')
     c.add_argument('-o', '--output', default='net_products.csv')
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
     client = PoliteClient(delay=args.delay, jitter=args.jitter,
-                          max_requests=args.max_requests, cache_dir=args.cache_dir)
+                          max_requests=args.max_requests, cache_dir=args.cache_dir,
+                          refresh=args.refresh)
     if args.cmd == 'discover':
         try:
             for url, text in discover(client, args.keyword).items():
@@ -326,7 +370,7 @@ def main(argv=None):
     rows, status = [], 0
     try:
         crawl(client, args.targets, args.max_pages,
-              args.name_keyword, args.exclude_origin, rows)
+              args.name_keyword, args.exclude_origin, rows, args.in_stock_only)
     except BlockedError as e:
         log.error('%s（已抓到的 %d 筆仍會寫出，快取保留，之後重跑可接續）', e, len(rows))
         status = 2

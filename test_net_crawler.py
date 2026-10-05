@@ -159,3 +159,46 @@ def test_promotion_pages_and_name_prefilter(client):
     assert '/promotion?id=7&page=2' in client.session.calls  # 有翻到第 2 頁
     assert '/product/2' in client.session.calls               # 第 2 頁的褲子有抓（再被產地排除）
     assert '/product/3' not in client.session.calls           # 包屁衣在列表就被篩掉，不抓產品頁
+
+
+def test_product_page_sizes_and_color():
+    html = product_html('長褲', '$299', '產地 越南製') + """
+    <div class="product_color_block"><div class="product_color_tag">719深藍</div></div>
+    <div class="product_color_block color_active"><div class="product_color_tag">720暗夜藍</div></div>
+    <div class="product_size">
+      <a id="size_32" quantity="58"><div class="product_size_block">32</div></a>
+      <a id="size_34" quantity="3"><div class="product_size_block">34</div></a>
+      <a id="size_36" quantity="0"><div class="product_size_block_none">36</div></a>
+      <a id="size_38" quantity="-1"><div class="product_size_block_none">38</div></a>
+    </div>"""
+    item = nc.parse_product_page(html)
+    assert item['color'] == '720暗夜藍'
+    assert item['sizes'] == '32/34'
+    assert item['original_price'] == '$299'  # 沒有原價區塊時等於售價
+    assert nc.parse_product_page(product_html('皮帶', '$149', '產地 台灣製'))['sizes'] is None
+
+
+PROMO_JSON_HTML = """
+<div class="saleGroup_title"><span class="saleGroup_title_name">零碼出清</span>
+<span class="saleGroup_title_price">任選 3件 5折</span></div>
+<script>var v = new Vue({data: {cartItems: [], promotionProducts: [
+ {"id":1,"price":"199","name":"\\u5b30\\u5e7c\\u5152\\u91dd\\u7e54\\u9577\\u8932","color":"002\\u767d\\u8272",
+  "image400":{"file_name":"https://img/1.jpg"},"promotion_price":99,
+  "sizes":[{"size":"S","quantity":"2"},{"size":"M","quantity":"0"},{"size":"L","quantity":9}]},
+ {"id":3,"name":"\\u5b30\\u5e7c\\u5152\\u5305\\u5c41\\u8863","color":"900\\u9ed1\\u8272",
+  "image400":{"file_name":"https://img/3.jpg"},"promotion_price":125,
+  "sizes":[{"size":"F","quantity":"0"}]}
+], pagination: {"previous":null,"current":1,"pageCount":1,"total":2,"next":null}}})</script>
+"""
+
+
+def test_promotion_json_stock_and_in_stock_only(client):
+    client.session.pages = {**PAGES, '/promotion/8': (200, PROMO_JSON_HTML)}
+    rows = []
+    nc.crawl(client, ['promotion/8'], 20, [], [], rows, in_stock_only=True)
+    assert len(rows) == 1  # 包屁衣全部沒貨，被排除
+    r = rows[0]
+    assert (r['name'], r['color'], r['sizes'], r['promo_price']) == ('嬰幼兒針織長褲', '002白色', 'S/L', '99')
+    assert r['origin'] == '台灣' and r['img'] == 'https://img/1.jpg'
+    assert r['original_price'] == '199'
+    assert r['promo'] == '零碼出清 任選 3件 5折'
