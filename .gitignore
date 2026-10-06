@@ -2,3 +2,7 @@ cache/
 *.csv
 __pycache__/
 .pytest_cache/
+*.html
+!app_template.html
+data/
+.venv/
