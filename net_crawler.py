@@ -312,8 +312,10 @@ def matches(item, name_keywords, exclude_origins):
 
 
 def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
-          in_stock_only=False, all_colors=False):
+          in_stock_only=False, all_colors=False, progress=None):
     """結果直接 append 到 rows，中途被擋時已抓到的資料不會遺失。
+
+    progress(已處理件數, 目前已知總件數) 會在每件商品處理後呼叫（總件數會隨著擴充顏色變多）。
 
     all_colors=True 時，分類頁的商品會再抓同款其他顏色（分類頁通常每款只列一個顏色）。
     活動頁只列有參加活動的顏色，不會擴充。
@@ -323,7 +325,9 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
     for kind, target_id in parsed:  # 活動頁先處理，同一商品優先保留活動價與即時庫存
         products, promo = collect_product_links(client, kind, target_id, max_pages)
         queue = list(products)
-        for link, img, list_name, extra in queue:  # 迴圈中可能再加入其他顏色
+        for i, (link, img, list_name, extra) in enumerate(queue):  # 迴圈中可能再加入其他顏色
+            if progress and i:
+                progress(i, len(queue))
             if link in seen:
                 continue
             seen.add(link)
@@ -347,6 +351,8 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
             if matches(item, name_keywords, exclude_origins):
                 rows.append(item)
                 log.info('  ✓ %s｜%s｜%s｜%s', item['name'], item['color'], item['sizes'], item['origin'])
+        if progress:
+            progress(len(queue), len(queue))
 
 
 def discover(client, keywords):

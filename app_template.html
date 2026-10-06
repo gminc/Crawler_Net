@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NET 選品小幫手（本機版）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&family=Noto+Sans+TC:wght@400;500;700;900&display=swap">
+<style>
+/* Layout: 上方固定目錄（大分類 → 子分類），下方為該分類的商品牆；背景邊爬邊加卡片，底部是抓取狀態；右下角購物清單 */
+/* 固定白底單一主題 */
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --ink: #1b1f1e;
+  --muted: #69716d;
+  --line: #e3e6e4;
+  --chip: #f3f5f4;
+  --tag: #c4281c;        /* 吊牌紅：售價、警示 */
+  --tw: #1f6b4f;         /* 台灣製、完成狀態 */
+  --run: #b7791f;        /* 抓取中 */
+  --focus: #2d5bd7;
+  --shade: rgba(27, 31, 30, .32);
+  --body: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --num: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 14px; line-height: 1.5; }
+button { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-inline: 16px; }
+
+/* 目錄 */
+.dir { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); }
+.dir .wrap { display: grid; gap: 6px; padding-block: 10px; }
+.brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand b { font-weight: 900; font-size: 16px; }
+.brand .local { font-size: 11px; color: var(--tw); border: 1px solid var(--tw); border-radius: 3px; padding: 0 5px; letter-spacing: .06em; }
+.brand .q { margin-left: auto; font-size: 12px; color: var(--muted); }
+.tabs, .subs { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; min-width: 0; padding-block: 2px; }
+.tabs::-webkit-scrollbar, .subs::-webkit-scrollbar { display: none; }
+.tab { flex: none; border: 0; background: none; color: var(--muted); font: 700 15px/1.2 var(--body); padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.tab[aria-selected="true"] { color: var(--ink); background: var(--chip); }
+.subs { flex-wrap: wrap; overflow: visible; gap: 6px 14px; }
+.group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.group > span { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.leaf { flex: none; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px; padding: 4px 11px; font: 500 13px/1.2 var(--body); cursor: pointer; }
+.leaf[aria-current="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: transparent; flex: none; }
+.dot.running, .dot.queued { background: var(--run); }
+.dot.done { background: var(--tw); }
+.dot.error { background: var(--tag); }
+.leaf .n { font-family: var(--num); color: var(--muted); }
+.leaf[aria-current="true"] .n { color: #c9cfcc; }
+.subnote { font-size: 12px; color: var(--muted); }
+
+.banner { background: #fdecea; color: var(--tag); border: 1px solid var(--tag); border-radius: 6px; padding: 10px 12px; margin-top: 12px; font-size: 13px; }
+
+/* 分類內容 */
+main { padding-block: 22px 120px; }
+header.sec { display: grid; gap: 8px; padding-bottom: 14px; }
+h1 { margin: 0; font-weight: 900; font-size: clamp(24px, 4vw, 36px); line-height: 1.15; text-wrap: balance; }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 13px; align-items: baseline; }
+.facts b { color: var(--ink); font-family: var(--num); font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.facts a, .facts button.link { color: var(--ink); font-size: 12.5px; text-underline-offset: 3px; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.bar { display: grid; gap: 8px; border-block: 1px solid var(--line); padding-block: 10px; }
+.row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.row > .lab { flex: none; width: 34px; font-size: 12px; color: var(--muted); letter-spacing: .08em; }
+.scroller { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; min-width: 0; padding-block: 2px; }
+.scroller::-webkit-scrollbar { display: none; }
+.pill { flex: none; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px; padding: 5px 12px; font: 500 13px/1.2 var(--body); cursor: pointer; }
+.pill .n { color: var(--muted); font-family: var(--num); margin-left: 4px; }
+.pill[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.pill[aria-pressed="true"] .n { color: #c9cfcc; }
+.pill.size { font-family: var(--num); font-size: 15px; padding: 3px 11px; }
+select { font: 500 13px var(--body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+.hint { font-size: 12px; color: var(--muted); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(208px, 100%), 1fr)); gap: 28px 18px; padding-top: 20px; }
+.card { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.photo { position: relative; display: block; aspect-ratio: 345 / 480; max-width: 100%; background: var(--chip); border-radius: 4px; overflow: hidden; }
+.photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.origin { position: absolute; left: 8px; top: 8px; background: rgba(255,255,255,.94); border: 1px solid var(--line); color: var(--ink); font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 3px; }
+.origin.tw { background: var(--tw); border-color: var(--tw); color: #fff; }
+.name { font-weight: 700; font-size: 14.5px; line-height: 1.35; margin: 2px 0 0; }
+.price { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-family: var(--num); font-variant-numeric: tabular-nums; }
+.price .now { color: var(--tag); font-weight: 700; font-size: 24px; line-height: 1; }
+.price .now small { font-size: 13px; margin-right: 1px; }
+.price .was { color: var(--muted); text-decoration: line-through; font-size: 15px; }
+.price .per { font-family: var(--body); font-size: 11px; color: var(--muted); }
+.colors { display: flex; flex-wrap: wrap; gap: 5px; }
+.cbtn { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 4px; padding: 2px 7px; font: 400 12px/1.4 var(--body); cursor: pointer; }
+.cbtn .code { font-family: var(--num); color: var(--muted); margin-right: 3px; }
+.cbtn[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.cbtn.dim { opacity: .4; }
+.sizes { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.sizes .lab { font-size: 11px; color: var(--muted); flex-basis: 100%; }
+.sz { position: relative; min-width: 34px; text-align: center; border: 1px solid var(--ink); background: var(--bg); color: var(--ink); border-radius: 3px; padding: 2px 7px; font: 500 14px/1.3 var(--num); cursor: pointer; }
+.sz:hover { background: var(--chip); }
+.sz.hit { box-shadow: inset 0 0 0 1px var(--ink); font-weight: 700; }
+.sz.in { background: var(--ink); color: var(--bg); }
+.sz .q { position: absolute; top: -7px; right: -7px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--tag); color: #fff; font: 700 11px/16px var(--num); padding-inline: 3px; }
+.go { justify-self: start; font-size: 12.5px; color: var(--ink); text-underline-offset: 3px; }
+.go:hover { color: var(--tag); }
+
+/* 底部抓取狀態 */
+.tail { display: grid; justify-items: center; gap: 8px; padding: 40px 0 10px; color: var(--muted); font-size: 13px; text-align: center; }
+.tail b { color: var(--ink); font-family: var(--num); font-size: 15px; }
+.tail.done { padding-top: 28px; }
+.loader { width: 132px; height: 96px; }
+.loader .hanger { fill: none; stroke: var(--ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.loader .shirt { fill: none; stroke: var(--run); stroke-width: 2.4; stroke-linejoin: round; stroke-dasharray: 260; stroke-dashoffset: 260; animation: draw 2.4s ease-in-out infinite; }
+.loader .swing { transform-origin: 66px 10px; animation: swing 2.4s ease-in-out infinite; }
+.loader .d { fill: var(--run); animation: blink 1.2s infinite; }
+.loader .d2 { animation-delay: .2s; } .loader .d3 { animation-delay: .4s; }
+@keyframes draw { 0% { stroke-dashoffset: 260; } 55%, 75% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -260; } }
+@keyframes swing { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+@keyframes blink { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .loader .shirt { animation: none; stroke-dashoffset: 0; }
+  .loader .swing, .loader .d { animation: none; }
+}
+.welcome { max-width: 62ch; display: grid; gap: 10px; padding-block: 30px; }
+.welcome h1 { font-size: clamp(24px, 4vw, 34px); }
+.welcome p { margin: 0; color: var(--muted); }
+
+/* 購物清單 */
+.cartbtn { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 20; display: flex; align-items: center; gap: 10px; background: var(--ink); color: var(--bg); border: 0; border-radius: 999px; padding: 10px 18px; font: 700 14px var(--body); cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+.cartbtn .sum { font-family: var(--num); font-size: 18px; }
+.cartbtn .cnt { background: var(--tag); border-radius: 999px; min-width: 22px; height: 22px; padding-inline: 6px; font: 700 13px/22px var(--num); text-align: center; }
+.shade { position: fixed; inset: 0; z-index: 30; background: var(--shade); }
+.drawer { position: fixed; z-index: 31; top: 0; right: 0; bottom: 0; width: min(400px, 100%); background: var(--bg); display: grid; grid-template-rows: auto 1fr auto; box-shadow: -8px 0 30px rgba(0,0,0,.12); }
+.dhead { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.dhead h2 { margin: 0; font-size: 18px; font-weight: 900; }
+.x { border: 0; background: none; font-size: 22px; line-height: 1; padding: 4px 8px; cursor: pointer; color: var(--ink); }
+.dbody { overflow-y: auto; padding: 12px 16px; display: grid; gap: 12px; align-content: start; }
+.promo { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 12.5px; display: grid; gap: 6px; }
+.promo.ok { border-color: var(--tw); }
+.promo .st { color: var(--tag); font-weight: 700; }
+.promo.ok .st { color: var(--tw); }
+.meter { display: flex; gap: 3px; }
+.meter i { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+.meter i.on { background: var(--tag); }
+.promo.ok .meter i.on { background: var(--tw); }
+.item { display: grid; grid-template-columns: 52px 1fr auto; gap: 10px; align-items: start; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.item img { width: 52px; aspect-ratio: 345 / 480; object-fit: cover; border-radius: 3px; background: var(--chip); }
+.item .t { font-weight: 700; font-size: 13px; line-height: 1.35; }
+.item .v { color: var(--muted); font-size: 12px; }
+.item .v b { color: var(--ink); font-family: var(--num); font-size: 14px; }
+.item a { font-size: 12px; color: var(--ink); text-underline-offset: 3px; }
+.item .r { display: grid; gap: 6px; justify-items: end; font-family: var(--num); font-variant-numeric: tabular-nums; }
+.item .p { font-size: 17px; font-weight: 700; }
+.step { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 4px; }
+.step button { border: 0; background: none; width: 26px; height: 26px; cursor: pointer; font-size: 15px; color: var(--ink); }
+.step span { min-width: 18px; text-align: center; font-size: 15px; }
+.dfoot { border-top: 1px solid var(--line); padding: 12px 16px; display: grid; gap: 8px; }
+.tot { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; font-size: 13px; }
+.tot span:nth-child(even) { text-align: right; font-family: var(--num); font-size: 16px; font-variant-numeric: tabular-nums; }
+.tot .big { font-weight: 700; font-size: 15px; }
+.tot span.big:nth-child(even) { font-size: 24px; color: var(--tag); }
+.note { font-size: 11.5px; color: var(--muted); margin: 0; }
+.acts { display: flex; gap: 8px; }
+.acts button { flex: 1; border: 1px solid var(--ink); background: var(--bg); color: var(--ink); border-radius: 6px; padding: 9px; font-weight: 700; cursor: pointer; }
+.acts button.primary { background: var(--ink); color: var(--bg); }
+.acts button.warn { border-color: var(--tag); color: var(--tag); }
+.copybox { width: 100%; min-height: 120px; font: 12px/1.5 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.dempty { color: var(--muted); text-align: center; padding: 36px 8px; line-height: 1.8; white-space: pre-line; }
+.toast { position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 40; background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 6px; font-size: 13px; max-width: calc(100% - 32px); }
+
+@media (max-width: 480px) {
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 12px; }
+  .price .now { font-size: 21px; }
+  .brand .q { display: none; }
+  .drawer { top: auto; left: 0; width: 100%; max-height: 85%; border-radius: 12px 12px 0 0; }
+}
+</style>
+</head>
+<body>
+
+<nav class="dir" aria-label="目錄">
+  <div class="wrap">
+    <div class="brand"><b>NET 選品小幫手</b><span class="local">本機版</span><span class="q" id="queue"></span></div>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div class="subs" id="subs"></div>
+  </div>
+</nav>
+
+<div class="wrap">
+  <div class="banner" id="banner" hidden></div>
+  <main id="main"></main>
+</div>
+
+<template id="loader-tpl">
+  <svg class="loader" viewBox="0 0 132 96" role="img" aria-label="資料抓取中">
+    <g class="swing">
+      <path class="hanger" d="M66 6 a6 6 0 1 1 6 6 q-6 0 -6 6 v2 L22 44 h88 L66 20"/>
+      <path class="shirt" d="M48 50 l-16 10 6 12 10 -5 v24 h36 v-24 l10 5 6 -12 -16 -10 q-4 6 -18 6 q-14 0 -18 -6 z"/>
+    </g>
+  </svg>
+</template>
+
+<button class="cartbtn" id="cartbtn" type="button" aria-haspopup="dialog">購物清單 <span class="sum" id="cb-sum">$0</span><span class="cnt" id="cb-cnt">0</span></button>
+<div class="shade" id="shade" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title" hidden>
+  <div class="dhead"><h2 id="d-title">購物清單</h2><button class="x" id="d-close" type="button" aria-label="關閉">×</button></div>
+  <div class="dbody" id="d-body"></div>
+  <div class="dfoot" id="d-foot"></div>
+</aside>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script>
+const CONFIG = /*CONFIG*/{};
+const STORE_KEY = 'net-app';
+const CAT_ORDER = ['上衣', '褲・裙', '洋裝', '外套', '童裝', '配件'];
+const SIZE_ORDER = ['XS', 'S', 'M', 'L', 'XL', '2XL', 'XXL', '3XL', 'F'];
+const sizeKey = s => {
+  const i = SIZE_ORDER.indexOf(s);
+  if (i >= 0) return [0, i];
+  const n = parseFloat(s);
+  return isNaN(n) ? [2, 0] : [s.endsWith('cm') ? 1 : 1.5, n];
+};
+const bySize = (a, b) => { const x = sizeKey(a), y = sizeKey(b); return x[0] - y[0] || x[1] - y[1]; };
+const money = n => '$' + Math.round(n).toLocaleString('en-US');
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const api = (path, opts) => fetch(path, opts).then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.error || r.status))));
+
+const saved = (() => { try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (e) { return {}; } })();
+const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ cart: state.cart, sort: state.sort })); } catch (e) {} };
+
+const state = {
+  menu: [], tab: null, submenus: {}, status: { sections: {} },
+  sec: null,            // 目前打開的分類 {kind, id, title}
+  data: null,           // 伺服器回傳的分類狀態（cards 會逐步累加）
+  cat: '全部', sizes: new Set(), tw: false, sort: saved.sort || 'site', pick: {},
+  rendered: 0,          // 依網站順序時，已畫到第幾張（只追加新的，避免畫面閃爍）
+  // 購物清單存快照：換分類、重開程式都還在
+  cart: saved.cart || [],
+};
+
+/* ---------- 目錄 ---------- */
+function secKey(kind, id) { return kind + '/' + id; }
+function dotFor(kind, id) {
+  const s = state.status.sections[secKey(kind, id)];
+  return s ? s.status : '';
+}
+function leafButton(item, label, fullTitle) {
+  const b = el('button', 'leaf'); b.type = 'button';
+  b.append(el('span', 'dot ' + dotFor(item.kind, item.id)), document.createTextNode(label || item.title));
+  const s = state.status.sections[secKey(item.kind, item.id)];
+  if (s && s.status === 'done') b.append(el('span', 'n', s.shown));
+  if (state.sec && state.sec.kind === item.kind && state.sec.id === item.id) b.setAttribute('aria-current', 'true');
+  b.onclick = () => openSection(item.kind, item.id, fullTitle || item.title);
+  return b;
+}
+function renderTabs() {
+  const tabs = $('tabs'); tabs.textContent = '';
+  state.menu.forEach(item => {
+    const b = el('button', 'tab', item.title); b.type = 'button'; b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', state.tab === item);
+    b.onclick = () => selectTab(item);
+    tabs.append(b);
+  });
+}
+function renderSubs() {
+  const subs = $('subs'); subs.textContent = '';
+  const t = state.tab;
+  if (!t) { subs.append(el('span', 'subnote', '選一個大分類')); return; }
+  if (t.kind === 'promotion') { subs.append(leafButton(t)); return; }
+  const groups = state.submenus[secKey(t.kind, t.id)];
+  const all = el('div', 'group'); all.append(leafButton(t, '全部', t.title + '・全部')); subs.append(all);
+  if (!groups) { subs.append(el('span', 'subnote', '讀取子分類…')); return; }
+  groups.forEach(g => {
+    const box = el('div', 'group');
+    if (g.kind) box.append(leafButton(g, g.title, `${t.title}・${g.title}`));
+    else box.append(el('span', null, g.title));
+    g.children.forEach(c => box.append(leafButton(c, c.title, `${g.title}・${c.title}`)));
+    subs.append(box);
+  });
+}
+function selectTab(item) {
+  state.tab = item; renderTabs(); renderSubs();
+  const k = secKey(item.kind, item.id);
+  if (item.kind === 'category' && !state.submenus[k]) {
+    api(`/api/submenu/${item.kind}/${item.id}`).then(r => { state.submenus[k] = r.groups; if (state.tab === item) renderSubs(); })
+      .catch(e => showBanner('讀取子分類失敗：' + e.message));
+  }
+}
+
+/* ---------- 分類 ---------- */
+function openSection(kind, id, title) {
+  state.sec = { kind, id, title };
+  state.data = null; state.cat = '全部'; state.sizes = new Set(); state.tw = false; state.pick = {}; state.rendered = 0;
+  location.hash = kind + '-' + id;
+  renderSubs();
+  renderMain();
+  api(`/api/crawl/${kind}/${id}?title=${encodeURIComponent(title)}`, { method: 'POST' })
+    .then(d => { mergeSection(d); poll(); })
+    .catch(e => showBanner('無法開始抓取：' + e.message));
+}
+function mergeSection(d) {
+  if (!state.sec || d.key !== secKey(state.sec.kind, state.sec.id)) return;
+  if (!state.data || d.from === 0) state.data = Object.assign({}, d, { cards: d.cards.slice() });
+  else { const cards = state.data.cards.concat(d.cards); state.data = Object.assign({}, d, { cards }); }
+  renderMain();
+}
+let pollTimer;
+function poll() {
+  clearTimeout(pollTimer);
+  if (!state.sec) return;
+  const { kind, id } = state.sec;
+  const from = state.data ? state.data.cards.length : 0;
+  api(`/api/section/${kind}/${id}?from=${from}`).then(d => {
+    if (d.status !== 'idle') mergeSection(d);
+    if (['queued', 'running'].includes(d.status)) pollTimer = setTimeout(poll, 2000);
+  }).catch(() => { pollTimer = setTimeout(poll, 5000); });
+}
+
+function colorMatches(c) {
+  if (state.sizes.size && !c.sizes.some(s => state.sizes.has(s))) return false;
+  return true;
+}
+function styleMatches(st) {
+  if (state.cat !== '全部' && st.cat !== state.cat) return false;
+  if (state.tw && st.origin !== '台灣') return false;
+  return st.colors.some(colorMatches);
+}
+function sortedCards() {
+  const list = state.data.cards.filter(styleMatches);
+  const minPrice = st => Math.min(...st.colors.map(c => c.price));
+  if (state.sort === 'price') list.sort((a, b) => minPrice(a) - minPrice(b));
+  if (state.sort === 'price-desc') list.sort((a, b) => minPrice(b) - minPrice(a));
+  if (state.sort === 'sizes') list.sort((a, b) => new Set(b.colors.flatMap(c => c.sizes)).size - new Set(a.colors.flatMap(c => c.sizes)).size);
+  return list;
+}
+
+function renderMain() {
+  const main = $('main');
+  if (!state.sec) {
+    main.textContent = '';
+    const w = el('section', 'welcome');
+    w.append(el('h1', null, '從上方目錄選一個分類'),
+      el('p', null, '點了才開始抓。每款商品都先確認產地（排除' + (CONFIG.exclude || []).join('、') + '）和庫存，只有確定有貨的顏色、尺寸才會出現。'),
+      el('p', null, '抓取在背景進行，商品會陸續出現；同一分類 6 小時內再開會直接用已抓的資料。'));
+    main.append(w);
+    return;
+  }
+  const d = state.data;
+  // 只有骨架變動時才重畫整頁；新卡片用追加的
+  if (!main.querySelector('header.sec') || main.dataset.key !== secKey(state.sec.kind, state.sec.id)) {
+    main.textContent = ''; main.dataset.key = secKey(state.sec.kind, state.sec.id);
+    const head = el('header', 'sec');
+    head.append(el('h1', null, state.sec.title), el('div', 'facts'));
+    head.querySelector('.facts').id = 'facts';
+    const bar = el('div', 'bar'); bar.id = 'bar';
+    const grid = el('div', 'grid'); grid.id = 'grid';
+    const tail = el('div', 'tail'); tail.id = 'tail';
+    main.append(head, bar, grid, tail);
+    state.rendered = 0;
+  }
+  renderFacts(); renderBar(); renderGrid(); renderTail();
+}
+function renderFacts() {
+  const f = $('facts'), d = state.data; f.textContent = '';
+  if (d && d.title && /^(category|promotion)\/\d+$/.test(state.sec.title)) {  // 從網址直接打開時，改用伺服器記錄的名稱
+    state.sec.title = d.title; document.querySelector('header.sec h1').textContent = d.title;
+  }
+  if (!d) { f.append(el('span', null, '準備中…')); return; }
+  const add = (n, label) => { const s = el('span'); s.append(el('b', null, n), document.createTextNode(' ' + label)); f.append(s); };
+  add(d.cards.length, '款可買');
+  if (d.total) add(`${d.checked}/${d.total}`, '款已檢查');
+  if (d.excluded_origin) add(d.excluded_origin, '款排除（產地）');
+  if (d.excluded_stock) add(d.excluded_stock, '款沒庫存');
+  if (d.promo) f.append(el('span', null, d.promo));
+  const a = el('a', null, '在 NET 打開'); a.href = d.url; a.target = '_blank'; a.rel = 'noopener'; f.append(a);
+  if (d.status === 'done' || d.status === 'error') {
+    const r = el('button', 'link', '重新抓庫存'); r.type = 'button';
+    r.onclick = () => {
+      state.data = null; state.rendered = 0; renderMain();
+      api(`/api/crawl/${state.sec.kind}/${state.sec.id}?refresh=1&title=${encodeURIComponent(state.sec.title)}`, { method: 'POST' })
+        .then(d2 => { mergeSection(d2); poll(); });
+    };
+    f.append(r);
+  }
+}
+function renderBar() {
+  const bar = $('bar'), d = state.data; bar.textContent = '';
+  if (!d || !d.cards.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const counts = {};
+  d.cards.forEach(st => counts[st.cat] = (counts[st.cat] || 0) + 1);
+  const row = (label, node) => { const r = el('div', 'row'); r.append(el('span', 'lab', label), node); bar.append(r); return r; };
+  const cats = el('div', 'scroller');
+  ['全部', ...CAT_ORDER.filter(c => counts[c])].forEach(c => {
+    const b = el('button', 'pill', c); b.type = 'button';
+    b.append(el('span', 'n', c === '全部' ? d.cards.length : counts[c]));
+    b.setAttribute('aria-pressed', state.cat === c);
+    b.onclick = () => { state.cat = c; state.pick = {}; state.rendered = 0; renderBar(); renderGrid(); };
+    cats.append(b);
+  });
+  row('分類', cats);
+  const sz = el('div', 'scroller');
+  [...new Set(d.cards.flatMap(st => st.colors.flatMap(c => c.sizes)))].sort(bySize).forEach(s => {
+    const b = el('button', 'pill size', s); b.type = 'button';
+    b.setAttribute('aria-pressed', state.sizes.has(s));
+    b.onclick = () => { state.sizes.has(s) ? state.sizes.delete(s) : state.sizes.add(s); state.pick = {}; state.rendered = 0; renderBar(); renderGrid(); };
+    sz.append(b);
+  });
+  row('尺寸', sz);
+  const sel = el('select'); sel.id = 'sort'; sel.setAttribute('aria-label', '排序');
+  [['site', '網站順序'], ['price', '價格 低 → 高'], ['price-desc', '價格 高 → 低'], ['sizes', '尺寸最齊全']]
+    .forEach(([v, t]) => { const o = el('option', null, t); o.value = v; sel.append(o); });
+  sel.value = state.sort;
+  sel.onchange = () => { state.sort = sel.value; save(); state.rendered = 0; renderGrid(); renderBar(); };
+  const r = row('排序', sel);
+  if (d.cards.some(st => st.origin === '台灣')) {
+    const tw = el('button', 'pill', '只看台灣製'); tw.type = 'button'; tw.setAttribute('aria-pressed', state.tw);
+    tw.onclick = () => { state.tw = !state.tw; state.rendered = 0; renderBar(); renderGrid(); };
+    r.append(tw);
+  }
+  if (state.sort !== 'site' && ['queued', 'running'].includes(d.status)) r.append(el('span', 'hint', '還在抓取，只排序已載入的商品'));
+}
+function renderGrid() {
+  const grid = $('grid'), d = state.data;
+  if (!d) { grid.textContent = ''; return; }
+  const list = sortedCards();
+  if (state.sort === 'site' && state.rendered > 0 && grid.children.length === state.rendered) {
+    list.slice(state.rendered).forEach(st => grid.append(card(st)));   // 只追加新的
+  } else {
+    grid.textContent = '';
+    list.forEach(st => grid.append(card(st)));
+  }
+  state.rendered = list.length;
+}
+function renderTail() {
+  const tail = $('tail'), d = state.data; tail.textContent = ''; tail.className = 'tail';
+  if (!d || ['queued', 'running'].includes(d.status)) {
+    tail.append(document.getElementById('loader-tpl').content.cloneNode(true));
+    const msg = el('div');
+    if (!d || d.status === 'queued') msg.textContent = '排隊中，前一個分類抓完就開始';
+    else if (!d.total) msg.textContent = '資料抓取中・讀取商品列表…';
+    else { msg.append(document.createTextNode('資料抓取中・已檢查 '), el('b', null, `${d.checked}/${d.total}`), document.createTextNode(' 款')); }
+    tail.append(msg);
+    if (d && d.status === 'running') tail.append(el('div', null, '一次只發一個請求、每 3～6 秒一次，避免被網站封鎖'));
+  } else if (d.status === 'done') {
+    tail.classList.add('done');
+    tail.append(el('div', null, d.cards.length ? `已全部載入・共 ${d.cards.length} 款` : '這個分類目前沒有符合條件、有庫存的商品'));
+  } else if (d.status === 'error') {
+    tail.append(el('div', null, '抓取中斷：' + d.message));
+  }
+}
+
+function card(st) {
+  const matching = st.colors.filter(colorMatches);
+  let idx = state.pick[st.name];
+  if (idx == null) idx = Math.max(0, st.colors.indexOf(matching[0]));
+  const c = st.colors[idx];
+  const art = el('article', 'card');
+  const photo = el('a', 'photo'); photo.href = c.link; photo.target = '_blank'; photo.rel = 'noopener';
+  if (c.img) { const img = el('img'); img.src = c.img; img.alt = `${st.name} ${c.color}`; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer'; photo.append(img); }
+  photo.append(el('span', 'origin' + (st.origin === '台灣' ? ' tw' : ''), st.origin === '未標示' ? '產地未標示' : st.origin + '製'));
+  const price = el('div', 'price');
+  const now = el('span', 'now'); now.append(el('small', null, '$'), document.createTextNode(c.price));
+  price.append(now);
+  if (c.orig > c.price) price.append(el('span', 'was', '$' + c.orig));
+  price.append(el('span', 'per', '/ 件'));
+  const colors = el('div', 'colors');
+  st.colors.forEach((cc, i) => {
+    const b = el('button', 'cbtn' + (colorMatches(cc) ? '' : ' dim')); b.type = 'button';
+    if (cc.code) b.append(el('span', 'code', cc.code));
+    b.append(document.createTextNode(cc.color || '單一顏色'));
+    b.setAttribute('aria-pressed', i === idx);
+    b.onclick = () => { state.pick[st.name] = i; art.replaceWith(card(st)); };
+    colors.append(b);
+  });
+  const sizes = el('div', 'sizes');
+  sizes.append(el('span', 'lab', '有貨尺寸（點一下加入清單）'));
+  [...c.sizes].sort(bySize).forEach(s => {
+    const q = qtyOf(c.link, s);
+    const b = el('button', 'sz' + (state.sizes.has(s) ? ' hit' : '') + (q ? ' in' : ''), s); b.type = 'button';
+    b.setAttribute('aria-label', `把 ${c.color} ${s} 加入購物清單` + (q ? `（已有 ${q} 件）` : ''));
+    if (q) b.append(el('span', 'q', q));
+    b.onclick = () => { addToCart(st, c, s); art.replaceWith(card(st)); };
+    sizes.append(b);
+  });
+  const go = el('a', 'go', '看商品頁 →'); go.href = c.link; go.target = '_blank'; go.rel = 'noopener';
+  art.append(photo, el('h2', 'name', st.name), price, colors, sizes, go);
+  return art;
+}
+
+/* ---------- 購物清單 ---------- */
+// 「任選 3件 5折」：每湊滿 3 件，這 3 件用活動價，湊不滿的用原價
+// 「任選 3件 249」：每湊滿 3 件合計 249，湊不滿的用售價
+function promoRule(text) {
+  let m = (text || '').match(/任選\s*(\d+)\s*件\s*([\d.]+)\s*折/);
+  if (m) return { n: +m[1], kind: 'pct' };
+  m = (text || '').match(/任選\s*(\d+)\s*件\s*(?:NT)?\$?\s*(\d+)\s*元?\s*$/);
+  if (m) return { n: +m[1], kind: 'bundle', total: +m[2] };
+  return null;
+}
+function cartSummary() {
+  const units = [];
+  state.cart.forEach(x => { for (let i = 0; i < x.qty; i++) units.push(x); });
+  const groups = new Map();
+  units.forEach(c => { const k = promoRule(c.promo) ? c.promo : ''; groups.set(k, [...(groups.get(k) || []), c]); });
+  let pay = 0, orig = 0, extra = 0;
+  const promos = [];
+  groups.forEach((list, promo) => {
+    list.forEach(c => orig += c.orig);
+    const rule = promoRule(promo);
+    if (!rule) { list.forEach(c => pay += c.price); return; }
+    const sorted = [...list].sort((a, b) => b.orig - a.orig);
+    const full = Math.floor(sorted.length / rule.n) * rule.n;
+    if (rule.kind === 'pct') {
+      sorted.forEach((c, i) => { pay += i < full ? c.price : c.orig; if (i >= full) extra += c.orig - c.price; });
+    } else {
+      pay += (full / rule.n) * rule.total;
+      sorted.slice(full).forEach(c => pay += c.price);
+    }
+    promos.push({ promo, n: rule.n, count: list.length, need: (rule.n - list.length % rule.n) % rule.n });
+  });
+  return { count: units.length, pay, orig, extra, promos };
+}
+const qtyOf = (link, size) => (state.cart.find(x => x.link === link && x.size === size) || {}).qty || 0;
+let toastTimer;
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 1800); }
+function addToCart(st, c, size) {
+  const hit = state.cart.find(x => x.link === c.link && x.size === size);
+  if (hit) hit.qty++;
+  else state.cart.push({ link: c.link, size, qty: 1, name: st.name, code: c.code, color: c.color,
+                         price: c.price, orig: c.orig, promo: st.promo || '', img: c.img });
+  save(); renderCartButton(); toast(`已加入：${st.name} ${c.color} ${size}`);
+  if (!$('drawer').hidden) renderDrawer();
+}
+function setQty(i, qty) {
+  if (qty <= 0) state.cart.splice(i, 1); else state.cart[i].qty = qty;
+  save(); renderCartButton(); renderDrawer(); state.rendered = 0; if (state.data) renderGrid();
+}
+function renderCartButton() { const s = cartSummary(); $('cb-cnt').textContent = s.count; $('cb-sum').textContent = money(s.pay); }
+let clearArmed = false;
+function renderDrawer() {
+  const body = $('d-body'), foot = $('d-foot'), s = cartSummary();
+  body.textContent = ''; foot.textContent = '';
+  if (!state.cart.length) { body.append(el('p', 'dempty', '清單是空的。\n在商品卡片上點尺寸，就會加到這裡。')); return; }
+  s.promos.forEach(p => {
+    const box = el('div', 'promo' + (p.need ? '' : ' ok'));
+    const line = el('div'); line.append(el('b', null, p.promo + '：'), document.createTextNode(`已選 ${p.count} 件，`));
+    line.append(el('span', 'st', p.need ? `再 ${p.need} 件湊滿 ${p.count + p.need} 件` : '已湊滿'));
+    const meter = el('div', 'meter');
+    const slots = Math.ceil(Math.max(p.count, 1) / p.n) * p.n;
+    for (let i = 0; i < slots; i++) meter.append(el('i', i < p.count ? 'on' : ''));
+    box.append(line, meter); body.append(box);
+  });
+  state.cart.forEach((x, i) => {
+    const row = el('div', 'item');
+    const img = el('img'); if (x.img) img.src = x.img; img.alt = ''; img.referrerPolicy = 'no-referrer';
+    const mid = el('div'); mid.style.minWidth = '0';
+    const v = el('div', 'v'); v.append(document.createTextNode((x.color || '單一顏色') + ' ・ 尺寸 '), el('b', null, x.size));
+    const a = el('a', null, '到 NET 加入購物車 →'); a.href = x.link; a.target = '_blank'; a.rel = 'noopener';
+    mid.append(el('div', 't', x.name), v, a);
+    const r = el('div', 'r');
+    r.append(el('span', 'p', money(x.price * x.qty)));
+    const step = el('div', 'step');
+    const minus = el('button', null, x.qty > 1 ? '−' : '×'); minus.type = 'button';
+    minus.setAttribute('aria-label', x.qty > 1 ? '減少一件' : '從清單移除'); minus.onclick = () => setQty(i, x.qty - 1);
+    const plus = el('button', null, '+'); plus.type = 'button'; plus.setAttribute('aria-label', '增加一件'); plus.onclick = () => setQty(i, x.qty + 1);
+    step.append(minus, el('span', null, x.qty), plus); r.append(step);
+    row.append(img, mid, r); body.append(row);
+  });
+  const tot = el('div', 'tot');
+  tot.append(el('span', null, `原價合計（${s.count} 件）`), el('span', null, money(s.orig)));
+  if (s.extra > 0) tot.append(el('span', null, '未湊滿的件數以原價計'), el('span', null, '+' + money(s.extra)));
+  if (s.orig > s.pay) tot.append(el('span', null, '省下'), el('span', null, '−' + money(s.orig - s.pay)));
+  tot.append(el('span', 'big', '估計金額'), el('span', 'big', money(s.pay)));
+  const acts = el('div', 'acts');
+  const copy = el('button', 'primary', '複製清單'); copy.type = 'button'; copy.onclick = copyList;
+  const clear = el('button', clearArmed ? 'warn' : '', clearArmed ? '確定清空？' : '清空'); clear.type = 'button';
+  clear.onclick = () => {
+    if (!clearArmed) { clearArmed = true; renderDrawer(); setTimeout(() => { clearArmed = false; if (!$('drawer').hidden) renderDrawer(); }, 3000); return; }
+    clearArmed = false; state.cart = []; save(); renderCartButton(); renderDrawer(); state.rendered = 0; if (state.data) renderGrid();
+  };
+  acts.append(copy, clear);
+  foot.append(tot, el('p', 'note', '依活動規則估算（湊不滿的件數用原價），實際金額以 NET 結帳為準，不含運費。'), acts);
+}
+function copyList() {
+  const s = cartSummary();
+  const text = `NET 購物清單（${s.count} 件，估計 ${money(s.pay)}）\n\n` + state.cart.map(x =>
+    `${x.name}｜${x.code}${x.color}｜${x.size} ×${x.qty}｜${money(x.price * x.qty)}\n${x.link}`).join('\n\n');
+  const fallback = () => {
+    const box = el('textarea', 'copybox'); box.value = text; box.readOnly = true;
+    $('d-body').prepend(box); box.focus(); box.select(); toast('請按 Ctrl+C 複製選取的文字');
+  };
+  try { navigator.clipboard.writeText(text).then(() => toast('已複製，可以貼到記事本或 LINE'), fallback); } catch (e) { fallback(); }
+}
+let lastFocus;
+function openDrawer() { lastFocus = document.activeElement; renderDrawer(); $('drawer').hidden = false; $('shade').hidden = false; $('d-close').focus(); }
+function closeDrawer() { $('drawer').hidden = true; $('shade').hidden = true; if (lastFocus) lastFocus.focus(); }
+$('cartbtn').onclick = openDrawer; $('d-close').onclick = closeDrawer; $('shade').onclick = closeDrawer;
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('drawer').hidden) closeDrawer(); });
+
+/* ---------- 狀態列 ---------- */
+function showBanner(msg) { const b = $('banner'); b.textContent = msg; b.hidden = !msg; }
+function pollStatus() {
+  api('/api/status').then(s => {
+    state.status = s;
+    showBanner(s.blocked ? '網站拒絕了請求，已停止所有抓取以免被封鎖。請稍後關掉程式再重開。（' + s.blocked + '）' : '');
+    const q = s.current ? `抓取中：${(s.sections[s.current] || {}).title || s.current}` + (s.queue.length ? `，排隊 ${s.queue.length}` : '') : '';
+    $('queue').textContent = q;
+    renderSubs();
+  }).catch(() => showBanner('連不到本機程式，請確認 net_app.py 還在執行。'))
+    .finally(() => setTimeout(pollStatus, 4000));
+}
+
+/* ---------- 啟動 ---------- */
+renderCartButton();
+renderMain();
+api('/api/menu').then(r => {
+  state.menu = r.items; renderTabs(); renderSubs();
+  const m = location.hash.match(/^#(category|promotion)-(\d+)$/);
+  if (m) {
+    const top = state.menu.find(t => t.kind === m[1] && t.id === m[2]);
+    if (top) selectTab(top);
+    openSection(m[1], m[2], top ? top.title : m[1] + '/' + m[2]);
+  }
+}).catch(e => showBanner('讀取目錄失敗：' + e.message));
+pollStatus();
+</script>
+</body>
+</html>

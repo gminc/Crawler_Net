@@ -3,4 +3,6 @@ cache/
 __pycache__/
 .pytest_cache/
 *.html
-!gallery_template.html
+!app_template.html
+data/
+.venv/
