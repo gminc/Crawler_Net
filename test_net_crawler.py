@@ -39,6 +39,10 @@ class FakeResponse:
         self.headers, self.encoding = {}, 'utf-8'
         self.ok = status < 400
 
+    @property
+    def content(self):
+        return self.text.encode()
+
     def raise_for_status(self):
         if not self.ok:
             raise nc.requests.HTTPError(self.status_code)
@@ -202,3 +206,50 @@ def test_promotion_json_stock_and_in_stock_only(client):
     assert r['origin'] == '台灣' and r['img'] == 'https://img/1.jpg'
     assert r['original_price'] == '199'
     assert r['promo'] == '零碼出清 任選 3件 5折'
+
+
+def test_all_colors_expands_category_products(client, tmp_path):
+    color_blocks = """
+    <div class="product_color_block color_active"><img product_id="1"><div class="product_color_tag">002白色</div></div>
+    <div class="product_color_block"><img product_id="4"><div class="product_color_tag">900黑色</div></div>
+    <div class="product_size"><a quantity="2">S</a></div>"""
+    black = product_html('嬰幼兒針織長褲', '$199', '產地 台灣') + """
+    <img id="PRODUCT_IMAGE_MAIN" src="/img/4_main.jpg">
+    <div class="product_color_block"><img product_id="1"><div class="product_color_tag">002白色</div></div>
+    <div class="product_color_block color_active"><img product_id="4"><div class="product_color_tag">900黑色</div></div>
+    <div class="product_size"><a quantity="0">S</a><a quantity="5">M</a></div>"""
+    client.session.pages = {**PAGES,
+                            '/product/1': (200, PAGES['/product/1'][1] + color_blocks),
+                            '/product/4': (200, black)}
+    rows = []
+    nc.crawl(client, ['9'], 20, ['褲'], ['中國'], rows, all_colors=True)
+    got = [(r['name'], r['color'], r['sizes']) for r in rows]
+    assert got == [('嬰幼兒針織長褲', '002白色', 'S'), ('嬰幼兒針織長褲', '900黑色', 'M')]
+    assert rows[1]['img'].endswith('/img/4_main.jpg')  # 其他顏色的圖取自產品頁主圖
+    assert client.session.calls.count('/product/1') == 1  # 互相指回去的顏色不會重抓
+
+    out = tmp_path / 'x.csv'
+    nc.write_csv(rows, out)  # 多出來的內部欄位不會讓寫檔失敗
+    assert 'color_links' not in out.read_text(encoding='utf-8-sig')
+
+
+def test_get_bytes_cached(client):
+    client.session.pages = {**PAGES, '/img/1.jpg': (200, 'JPEGDATA')}
+    assert client.get_bytes(nc.BASE_URL + '/img/1.jpg') == b'JPEGDATA'
+    assert client.get_bytes(nc.BASE_URL + '/img/1.jpg') == b'JPEGDATA'
+    assert client.session.calls.count('/img/1.jpg') == 1
+
+
+def test_global_options_work_before_or_after_subcommand(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.requests_made = 0
+
+    monkeypatch.setattr(nc, 'PoliteClient', FakeClient)
+    monkeypatch.setattr(nc, 'crawl', lambda *a, **k: None)
+    monkeypatch.setattr(nc, 'write_csv', lambda rows, path: None)
+    nc.main(['--max-requests', '50', 'crawl', '9', '--refresh', '--delay', '5'])
+    assert (seen['max_requests'], seen['refresh'], seen['delay'], seen['jitter']) == (50, True, 5.0, 3.0)

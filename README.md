@@ -15,6 +15,7 @@ python net_crawler.py discover --keyword 嬰 寶寶 BABY 童
 python net_crawler.py crawl 1662 --name-keyword 褲 --exclude-origin 中國 大陸 China -o baby_pants.csv
 ```
 - 可一次給多個分類代號：`crawl 1662 1663`
+- 分類頁通常每款只列一個顏色，加 `--all-colors` 會再抓同款其他顏色（每個顏色多一個請求）
 - 活動頁（任選 N 件、零碼出清等）也可以爬，直接貼網址或寫 `promotion/代號`：
   ```
   python net_crawler.py crawl https://www.net-fashion.net/promotion/1490 promotion/658
@@ -26,6 +27,22 @@ python net_crawler.py crawl 1662 --name-keyword 褲 --exclude-origin 中國 大�
 - 有給 `--name-keyword` 時，列表上品名就不符合的商品不會去抓商品頁，省請求
 - 產地沒標示的商品會保留，產地欄寫「未標示」，請自行確認
 - CSV 用 utf-8-sig 編碼，Excel 直接開不會亂碼
+
+## 圖片清單網頁
+把爬下來的 CSV 做成一個 HTML 檔：商品照、價格、產地、各顏色有貨尺寸，可依分類／尺寸／台灣製篩選，還有購物清單。
+```
+# 活動頁
+python net_crawler.py crawl promotion/658 --exclude-origin 中國 大陸 China --in-stock-only -o clearance.csv
+python net_gallery.py clearance.csv -o clearance.html
+
+# 分類頁：加 --all-colors 才會有同款的所有顏色，--refresh 取得最新庫存
+python net_crawler.py crawl 1822 1824 --all-colors --refresh --in-stock-only -o baby.csv
+python net_gallery.py baby.csv --title 嬰兒下身類 -o baby.html
+```
+- 用瀏覽器直接打開產生的 HTML 即可，圖片已內嵌，不用連網
+- 購物清單：點卡片上的尺寸就會加入；會依「任選 N 件 X 折」「任選 N 件 $金額」估算總額、提醒還差幾件湊滿；可複製清單（含商品連結）
+- 清單只存在自己的瀏覽器，結帳要從清單點回 NET 商品頁加入購物車
+- 圖片下載有快取（`cache/img/`），重新產生網頁不會再抓；裝了 Pillow（`pip install pillow`）會縮圖，檔案較小
 
 ## 避免被封鎖的設計
 舊版（`crawler_01.py` 用 000~999 暴力試代號、`crawler_02.py` 每換一頁就把前面所有產品重抓一次）

@@ -103,6 +103,28 @@ class PoliteClient:
             if path.exists():
                 return url, path.read_text(encoding='utf-8')
 
+        r = self._fetch(url)
+        r.encoding = r.apparent_encoding if r.encoding in (None, 'ISO-8859-1') else r.encoding
+        if use_cache and self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self._cache_path(url).write_text(r.text, encoding='utf-8')
+        return r.url, r.text
+
+    def get_bytes(self, url):
+        """下載圖片等二進位檔。圖片網址帶版本號，內容不會變，一律走快取（--refresh 也不重抓）。"""
+        path = None
+        if self.cache_dir:
+            path = self.cache_dir / 'img' / hashlib.sha1(url.encode()).hexdigest()
+            if path.exists():
+                return path.read_bytes()
+        data = self._fetch(url).content
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return data
+
+    def _fetch(self, url):
+        """實際發出請求：檢查 robots.txt、重試、退避；遇到 403 就停。"""
         if self.robots is not None and not self.robots.can_fetch(USER_AGENT, url):
             raise PermissionError(f'robots.txt 不允許抓取：{url}')
 
@@ -122,12 +144,7 @@ class PoliteClient:
                 time.sleep(wait)
                 continue
             r.raise_for_status()
-            r.encoding = r.apparent_encoding if r.encoding in (None, 'ISO-8859-1') else r.encoding
-
-            if use_cache and self.cache_dir:
-                self.cache_dir.mkdir(parents=True, exist_ok=True)
-                self._cache_path(url).write_text(r.text, encoding='utf-8')
-            return r.url, r.text
+            return r
 
         raise BlockedError(f'重試 {self.max_retries} 次仍失敗，停止：{url}')
 
@@ -217,12 +234,17 @@ def parse_product_page(html):
     price = _text(soup.select_one('div.product_priceR_real > b'))
     original_price = _text(soup.select_one('div.product_priceR_original'))
     size_links = soup.select('.product_size a[quantity]')
+    main_img = soup.select_one('#PRODUCT_IMAGE_MAIN')
     return {
         'name': name, 'price': price, 'original_price': original_price or price,
         'origin': parse_origin(soup),
         'color': _text(soup.select_one('.product_color_block.color_active .product_color_tag')),
         # 頁面沒有尺寸區塊時為 None（未知），有區塊但全部沒貨時為 ''
         'sizes': _in_stock((_text(a), a['quantity']) for a in size_links) if size_links else None,
+        'main_img': main_img.get('src', '') if main_img else '',
+        # 同款其他顏色的產品頁（--all-colors 用）
+        'color_links': [f"{BASE_URL}/product/{img['product_id']}"
+                        for img in soup.select('.product_color_block:not(.color_active) img[product_id]')],
     }
 
 
@@ -286,13 +308,19 @@ def matches(item, name_keywords, exclude_origins):
     return True
 
 
-def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows, in_stock_only=False):
-    """結果直接 append 到 rows，中途被擋時已抓到的資料不會遺失。"""
+def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
+          in_stock_only=False, all_colors=False):
+    """結果直接 append 到 rows，中途被擋時已抓到的資料不會遺失。
+
+    all_colors=True 時，分類頁的商品會再抓同款其他顏色（分類頁通常每款只列一個顏色）。
+    活動頁只列有參加活動的顏色，不會擴充。
+    """
     seen = set()
     for target in targets:
         kind, target_id = parse_target(target)
         products, promo = collect_product_links(client, kind, target_id, max_pages)
-        for link, img, list_name, extra in products:
+        queue = list(products)
+        for link, img, list_name, extra in queue:  # 迴圈中可能再加入其他顏色
             if link in seen:
                 continue
             seen.add(link)
@@ -303,6 +331,10 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows, in_s
             if not item['name']:
                 log.warning('解析不到品名（網站版面可能改了）：%s', link)
                 continue
+            if all_colors and kind == 'category':
+                queue.extend((c, '', item['name'], {}) for c in item['color_links'] if c not in seen)
+            if not img and item['main_img']:
+                img = urljoin(link, item['main_img'])
             item.update(extra)  # 活動頁資料是當下的庫存，比快取的產品頁新
             item.update(source=f'{kind}/{target_id}', promo=promo, link=link, img=img)
             if in_stock_only and item['sizes'] == '':
@@ -327,30 +359,40 @@ def write_csv(rows, path):
     # price：商品頁顯示的售價（有活動時是活動價）；original_price：原價；promo_price：活動頁標示的活動價
     fields = ['name', 'color', 'sizes', 'price', 'original_price', 'promo_price', 'origin', 'promo', 'source', 'link', 'img']
     with open(path, 'w', newline='', encoding='utf-8-sig') as f:  # utf-8-sig：Excel 開啟不亂碼
-        w = csv.DictWriter(f, fieldnames=fields, restval='')
+        w = csv.DictWriter(f, fieldnames=fields, restval='', extrasaction='ignore')
         w.writeheader()
         w.writerows(rows)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='NET 購物網站禮貌爬蟲')
-    p.add_argument('--delay', type=float, default=3.0, help='每個請求最少間隔秒數（預設 3）')
-    p.add_argument('--jitter', type=float, default=3.0, help='額外隨機間隔上限秒數（預設 3）')
-    p.add_argument('--max-requests', type=int, default=300, help='本次執行請求上限（預設 300）')
-    p.add_argument('--cache-dir', default='cache', help='產品頁快取資料夾')
-    p.add_argument('--refresh', action='store_true', help='不讀快取，重抓產品頁（要最新庫存時用）')
+    def common(parser, suppress=False):
+        # 子指令也接受這些選項（放在 crawl 前後都可以）；子指令沒給時不覆蓋前面的值
+        default = (lambda v: argparse.SUPPRESS) if suppress else (lambda v: v)
+        parser.add_argument('--delay', type=float, default=default(3.0), help='每個請求最少間隔秒數（預設 3）')
+        parser.add_argument('--jitter', type=float, default=default(3.0), help='額外隨機間隔上限秒數（預設 3）')
+        parser.add_argument('--max-requests', type=int, default=default(300), help='本次執行請求上限（預設 300）')
+        parser.add_argument('--cache-dir', default=default('cache'), help='產品頁快取資料夾')
+        parser.add_argument('--refresh', action='store_true', default=default(False),
+                            help='不讀快取，重抓產品頁（要最新庫存時用）')
+
+    common(p)
     sub = p.add_subparsers(dest='cmd', required=True)
 
     d = sub.add_parser('discover', help='從首頁列出分類代號')
+    common(d, suppress=True)
     d.add_argument('--keyword', nargs='*', default=[], help='分類名稱關鍵字，例如 嬰 寶寶 童')
 
     c = sub.add_parser('crawl', help='爬指定分類或活動頁的產品')
+    common(c, suppress=True)
     c.add_argument('targets', nargs='+',
                    help='分類代號（1662）、promotion/658，或直接貼分類／活動頁網址')
     c.add_argument('--max-pages', type=int, default=20)
     c.add_argument('--name-keyword', nargs='*', default=[], help='品名需包含任一關鍵字，例如 褲')
     c.add_argument('--exclude-origin', nargs='*', default=[], help='排除的產地，例如 中國 大陸 China')
     c.add_argument('--in-stock-only', action='store_true', help='只保留還有尺寸有庫存的商品')
+    c.add_argument('--all-colors', action='store_true',
+                   help='分類頁的商品也抓同款其他顏色（每個顏色多一個請求）')
     c.add_argument('-o', '--output', default='net_products.csv')
 
     args = p.parse_args(argv)
@@ -370,7 +412,7 @@ def main(argv=None):
     rows, status = [], 0
     try:
         crawl(client, args.targets, args.max_pages,
-              args.name_keyword, args.exclude_origin, rows, args.in_stock_only)
+              args.name_keyword, args.exclude_origin, rows, args.in_stock_only, args.all_colors)
     except BlockedError as e:
         log.error('%s（已抓到的 %d 筆仍會寫出，快取保留，之後重跑可接續）', e, len(rows))
         status = 2
