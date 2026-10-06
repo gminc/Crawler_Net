@@ -178,7 +178,7 @@ footer a { color: inherit; }
 <script>
 const DATA = /*DATA*/[];
 const META = /*META*/{};
-const STORE_KEY = 'net-gallery:' + document.title;
+const STORE_KEY = 'net-gallery:' + document.title + '|' + (META.sources || []).map(s => s.label).join(',');
 const CAT_ORDER = ['上衣', '褲・裙', '洋裝', '外套', '童裝', '配件'];
 const SIZE_ORDER = ['XS', 'S', 'M', 'L', 'XL', '2XL', 'XXL', '3XL', 'F'];
 const sizeKey = s => {
@@ -212,7 +212,7 @@ const state = {
 function promoRule(text) {
   let m = (text || '').match(/任選\s*(\d+)\s*件\s*([\d.]+)\s*折/);
   if (m) return { n: +m[1], kind: 'pct' };
-  m = (text || '').match(/任選\s*(\d+)\s*件\s*(\d+)\s*元?\s*$/);
+  m = (text || '').match(/任選\s*(\d+)\s*件\s*(?:NT)?\$?\s*(\d+)\s*元?\s*$/);
   if (m) return { n: +m[1], kind: 'bundle', total: +m[2] };
   return null;
 }
@@ -221,7 +221,7 @@ function cartSummary() {
   state.cart.forEach(x => { const { c } = COLORS.get(x.link); for (let i = 0; i < x.qty; i++) units.push(c); });
   const groups = new Map();
   units.forEach(c => { const k = promoRule(c.promo) ? c.promo : ''; groups.set(k, [...(groups.get(k) || []), c]); });
-  let pay = 0, orig = 0;
+  let pay = 0, orig = 0, extra = 0;
   const promos = [];
   groups.forEach((list, promo) => {
     list.forEach(c => orig += c.orig);
@@ -230,14 +230,14 @@ function cartSummary() {
     const sorted = [...list].sort((a, b) => b.orig - a.orig); // 貴的先湊成一組
     const full = Math.floor(sorted.length / rule.n) * rule.n;
     if (rule.kind === 'pct') {
-      sorted.forEach((c, i) => pay += i < full ? c.price : c.orig);
+      sorted.forEach((c, i) => { pay += i < full ? c.price : c.orig; if (i >= full) extra += c.orig - c.price; });
     } else {
       pay += (full / rule.n) * rule.total;
       sorted.slice(full).forEach(c => pay += c.price);
     }
     promos.push({ promo, n: rule.n, count: list.length, need: (rule.n - list.length % rule.n) % rule.n });
   });
-  return { count: units.length, pay, orig, promos };
+  return { count: units.length, pay, orig, extra, promos };
 }
 
 /* ---------- 商品牆 ---------- */
@@ -257,7 +257,7 @@ function renderFilters() {
     const b = el('button', 'pill', c); b.type = 'button';
     b.append(el('span', 'n', c === '全部' ? DATA.length : counts[c]));
     b.setAttribute('aria-pressed', state.cat === c);
-    b.onclick = () => { state.cat = c; render(); };
+    b.onclick = () => { state.cat = c; state.pick = {}; render(); };
     cats.append(b);
   });
   const all = [...new Set(DATA.flatMap(st => st.colors.flatMap(c => c.sizes)))].sort(bySize);
@@ -265,7 +265,7 @@ function renderFilters() {
   all.forEach(s => {
     const b = el('button', 'pill size', s); b.type = 'button';
     b.setAttribute('aria-pressed', state.sizes.has(s));
-    b.onclick = () => { state.sizes.has(s) ? state.sizes.delete(s) : state.sizes.add(s); render(); };
+    b.onclick = () => { state.sizes.has(s) ? state.sizes.delete(s) : state.sizes.add(s); state.pick = {}; render(); };
     sz.append(b);
   });
   $('tw').setAttribute('aria-pressed', state.tw);
@@ -276,7 +276,7 @@ function renderFilters() {
 function card(st) {
   const matching = st.colors.filter(colorMatches);
   let idx = state.pick[st.name];
-  if (idx == null || !colorMatches(st.colors[idx])) idx = st.colors.indexOf(matching[0]);
+  if (idx == null) idx = st.colors.indexOf(matching[0]);
   const c = st.colors[idx];
 
   const art = el('article', 'card');
@@ -396,6 +396,8 @@ function renderDrawer() {
 
   const tot = el('div', 'tot');
   tot.append(el('span', null, `原價合計（${s.count} 件）`), el('span', null, money(s.orig)));
+  // 清單每行是活動價；湊不滿的件數改用原價，差額另列，讓數字加得起來
+  if (s.extra > 0) tot.append(el('span', null, '未湊滿的件數以原價計'), el('span', null, '+' + money(s.extra)));
   if (s.orig > s.pay) tot.append(el('span', null, '省下'), el('span', null, '−' + money(s.orig - s.pay)));
   tot.append(el('span', 'big', '估計金額'), el('span', 'big', money(s.pay)));
   const note = el('p', 'note', '依活動規則估算（湊不滿的件數用原價），實際金額以 NET 結帳為準，不含運費。');
@@ -444,7 +446,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('drawer
 
 /* ---------- 啟動 ---------- */
 $('sort').onchange = e => { state.sort = e.target.value; save(); render(); };
-$('tw').onclick = () => { state.tw = !state.tw; render(); };
+$('tw').onclick = () => { state.tw = !state.tw; state.pick = {}; render(); };
 $('f-styles').textContent = DATA.length;
 $('f-colors').textContent = DATA.reduce((n, st) => n + st.colors.length, 0);
 $('f-origins').textContent = '產地：' + (META.origins || []).map(([o, n]) => `${o} ${n}`).join('・');

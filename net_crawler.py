@@ -51,13 +51,14 @@ class BlockedError(RuntimeError):
 
 class PoliteClient:
     def __init__(self, delay=3.0, jitter=3.0, max_requests=300,
-                 cache_dir='cache', respect_robots=True, max_retries=3, refresh=False):
+                 cache_dir='cache', respect_robots=True, max_retries=3, refresh=False, max_age_hours=None):
         self.delay = delay
         self.jitter = jitter
         self.max_requests = max_requests
         self.max_retries = max_retries
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.refresh = refresh  # True：不讀快取（庫存要最新時用），但仍會更新快取
+        self.max_age = max_age_hours * 3600 if max_age_hours else None  # 只沿用這麼新的快取
         self.requests_made = 0
         self._last_request = 0.0
         self.session = requests.Session()
@@ -100,7 +101,9 @@ class PoliteClient:
         """回傳 (最終網址, HTML)。use_cache=True 時優先讀本機快取。"""
         if use_cache and self.cache_dir and not self.refresh:
             path = self._cache_path(url)
-            if path.exists():
+            fresh = path.exists() and (self.max_age is None
+                                       or time.time() - path.stat().st_mtime < self.max_age)
+            if fresh:
                 return url, path.read_text(encoding='utf-8')
 
         r = self._fetch(url)
@@ -316,8 +319,8 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
     活動頁只列有參加活動的顏色，不會擴充。
     """
     seen = set()
-    for target in targets:
-        kind, target_id = parse_target(target)
+    parsed = sorted((parse_target(t) for t in targets), key=lambda t: t[0] != 'promotion')
+    for kind, target_id in parsed:  # 活動頁先處理，同一商品優先保留活動價與即時庫存
         products, promo = collect_product_links(client, kind, target_id, max_pages)
         queue = list(products)
         for link, img, list_name, extra in queue:  # 迴圈中可能再加入其他顏色
@@ -331,11 +334,13 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
             if not item['name']:
                 log.warning('解析不到品名（網站版面可能改了）：%s', link)
                 continue
-            if all_colors and kind == 'category':
+            if all_colors and kind == 'category' and matches(item, [], exclude_origins):
                 queue.extend((c, '', item['name'], {}) for c in item['color_links'] if c not in seen)
             if not img and item['main_img']:
                 img = urljoin(link, item['main_img'])
-            item.update(extra)  # 活動頁資料是當下的庫存，比快取的產品頁新
+            item.update(extra)  # 活動頁資料是當下的庫存與價格，比快取的產品頁新
+            if extra.get('promo_price'):
+                item['price'] = extra['promo_price']
             item.update(source=f'{kind}/{target_id}', promo=promo, link=link, img=img)
             if in_stock_only and item['sizes'] == '':
                 continue
@@ -375,6 +380,8 @@ def main(argv=None):
         parser.add_argument('--cache-dir', default=default('cache'), help='產品頁快取資料夾')
         parser.add_argument('--refresh', action='store_true', default=default(False),
                             help='不讀快取，重抓產品頁（要最新庫存時用）')
+        parser.add_argument('--max-age', type=float, default=default(None), metavar='HOURS',
+                            help='只沿用 N 小時內的快取，較舊的重抓（例如 6）')
 
     common(p)
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -399,7 +406,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
     client = PoliteClient(delay=args.delay, jitter=args.jitter,
                           max_requests=args.max_requests, cache_dir=args.cache_dir,
-                          refresh=args.refresh)
+                          refresh=args.refresh, max_age_hours=args.max_age)
     if args.cmd == 'discover':
         try:
             for url, text in discover(client, args.keyword).items():

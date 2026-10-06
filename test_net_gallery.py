@@ -59,3 +59,28 @@ def test_script_close_tag_is_escaped():
 def test_default_title():
     assert ng.default_title(ROWS[:2]) == '零碼出清 任選 3件 5折'
     assert ng.default_title(ROWS) == 'NET 商品清單'
+
+
+def test_same_link_in_two_csvs_keeps_promo_row():
+    category_copy = dict(ROWS[0], promo='', source='category/1747', price='599')
+    styles = ng.build_styles([category_copy, ROWS[0]])
+    colors = styles[0]['colors']
+    assert len(colors) == 1 and colors[0]['promo'] == '零碼出清 任選 3件 5折' and colors[0]['price'] == 299
+
+
+def test_html_comment_in_data_is_escaped():
+    page = ng.render(ng.build_styles([dict(ROWS[0], name='<!--<script>')]), 't', 's')
+    assert '<!--<script>' not in page
+
+
+def test_fallback_embed_rejects_non_image(monkeypatch):
+    import builtins, pytest
+    real_import = builtins.__import__
+    def no_pil(name, *a, **k):
+        if name == 'PIL':
+            raise ImportError
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, '__import__', no_pil)
+    assert ng.to_data_uri(b'\x89PNG....', 360).startswith('data:image/png;base64,')
+    with pytest.raises(ValueError):
+        ng.to_data_uri(b'<html>error</html>', 360)

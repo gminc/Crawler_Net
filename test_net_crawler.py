@@ -205,6 +205,7 @@ def test_promotion_json_stock_and_in_stock_only(client):
     assert (r['name'], r['color'], r['sizes'], r['promo_price']) == ('嬰幼兒針織長褲', '002白色', 'S/L', '99')
     assert r['origin'] == '台灣' and r['img'] == 'https://img/1.jpg'
     assert r['original_price'] == '199'
+    assert r['price'] == '99'  # 活動頁的即時活動價蓋過快取商品頁的售價
     assert r['promo'] == '零碼出清 任選 3件 5折'
 
 
@@ -253,3 +254,23 @@ def test_global_options_work_before_or_after_subcommand(monkeypatch):
     monkeypatch.setattr(nc, 'write_csv', lambda rows, path: None)
     nc.main(['--max-requests', '50', 'crawl', '9', '--refresh', '--delay', '5'])
     assert (seen['max_requests'], seen['refresh'], seen['delay'], seen['jitter']) == (50, True, 5.0, 3.0)
+
+
+def test_promotion_targets_processed_first(client):
+    client.session.pages = {**PAGES, '/promotion/8': (200, PROMO_JSON_HTML)}
+    rows = []
+    nc.crawl(client, ['9', 'promotion/8'], 20, [], [], rows)
+    first = next(r for r in rows if r['link'].endswith('/product/1'))
+    assert first['source'] == 'promotion/8' and first['promo']  # 同一商品保留活動版本
+
+
+def test_max_age_refetches_old_cache(client):
+    import os
+    url = nc.BASE_URL + '/product/1'
+    client.get(url, use_cache=True)
+    client.max_age = 3600
+    path = client._cache_path(url)
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime - 7200))  # 兩小時前的快取
+    client.get(url, use_cache=True)
+    client.get(url, use_cache=True)  # 剛重抓過，這次走快取
+    assert client.session.calls.count('/product/1') == 2

@@ -56,8 +56,12 @@ def split_color(color):
 
 def build_styles(rows):
     """CSV 列 → 依品名分組的款式，每款底下是各顏色。"""
+    by_link = OrderedDict()
+    for r in rows:  # 同一商品出現在多份 CSV 時只留一筆，優先保留有活動資料的
+        if r['link'] not in by_link or (r.get('promo') and not by_link[r['link']].get('promo')):
+            by_link[r['link']] = r
     styles = OrderedDict()
-    for r in rows:
+    for r in by_link.values():
         style = styles.setdefault(r['name'], {'name': r['name'], 'cat': guess_category(r['name']),
                                               'colors': []})
         code, color = split_color(r.get('color', ''))
@@ -77,7 +81,11 @@ def to_data_uri(data, thumb_width):
     try:
         from PIL import Image
     except ImportError:  # 沒裝 Pillow 就直接內嵌原圖，檔案會大一些
-        return 'data:image/jpeg;base64,' + base64.b64encode(data).decode()
+        kinds = {b'\xff\xd8\xff': 'jpeg', b'\x89PNG': 'png', b'RIFF': 'webp', b'GIF8': 'gif'}
+        kind = next((k for magic, k in kinds.items() if data.startswith(magic)), None)
+        if not kind:
+            raise ValueError('不是圖片檔')
+        return f'data:image/{kind};base64,' + base64.b64encode(data).decode()
     im = Image.open(io.BytesIO(data)).convert('RGB')
     im.thumbnail((thumb_width, thumb_width * 4 // 3))
     buf = io.BytesIO()
@@ -113,8 +121,8 @@ def render(styles, title, stamp, template=TEMPLATE, fragment=False):
         'promos': sorted({c['promo'] for s in styles for c in s['colors'] if c['promo']}),
     }
     page = template.read_text(encoding='utf-8')
-    # </script> 不能出現在內嵌 JSON 裡
-    dump = lambda obj: json.dumps(obj, ensure_ascii=False).replace('</', '<\\/')
+    # 內嵌在 <script> 裡：把 < 轉義，避免 </script> 或 <!-- 提早結束程式碼
+    dump = lambda obj: json.dumps(obj, ensure_ascii=False).replace('<', '\\u003c')
     page = (page.replace('/*DATA*/[]', dump(styles))
                 .replace('/*META*/{}', dump(meta))
                 .replace('{{TITLE}}', html.escape(title))
@@ -160,6 +168,10 @@ def main(argv=None):
         embed_images(client, styles, args.thumb_width)
     except nc.BlockedError as e:
         log.error('%s（沒下載到的圖片會留白）', e)
+        for style in styles:
+            for c in style['colors']:
+                if not c['img'].startswith('data:'):
+                    c['img'] = ''
 
     page = render(styles, args.title or default_title(rows), stamp, fragment=args.fragment)
     Path(args.output).write_text(page, encoding='utf-8')

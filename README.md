@@ -35,8 +35,8 @@ python net_crawler.py crawl 1662 --name-keyword 褲 --exclude-origin 中國 大�
 python net_crawler.py crawl promotion/658 --exclude-origin 中國 大陸 China --in-stock-only -o clearance.csv
 python net_gallery.py clearance.csv -o clearance.html
 
-# 分類頁：加 --all-colors 才會有同款的所有顏色，--refresh 取得最新庫存
-python net_crawler.py crawl 1822 1824 --all-colors --refresh --in-stock-only -o baby.csv
+# 分類頁：加 --all-colors 才會有同款的所有顏色；--max-age 6 表示 6 小時內抓過的頁面不重抓，較舊的重抓（拿最新庫存）
+python net_crawler.py crawl 1822 1824 --all-colors --max-age 6 --in-stock-only -o baby.csv
 python net_gallery.py baby.csv --title 嬰兒下身類 -o baby.html
 ```
 - 用瀏覽器直接打開產生的 HTML 即可，圖片已內嵌，不用連網
