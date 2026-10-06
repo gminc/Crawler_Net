@@ -125,6 +125,7 @@ select { font: 500 13px var(--body); color: var(--ink); background: var(--bg); b
 .welcome { max-width: 62ch; display: grid; gap: 10px; padding-block: 30px; }
 .welcome h1 { font-size: clamp(24px, 4vw, 34px); }
 .welcome p { margin: 0; color: var(--muted); }
+.welcome .pill { justify-self: start; padding: 8px 16px; font-weight: 700; }
 
 /* 購物清單 */
 .cartbtn { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 20; display: flex; align-items: center; gap: 10px; background: var(--ink); color: var(--bg); border: 0; border-radius: 999px; padding: 10px 18px; font: 700 14px var(--body); cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
@@ -225,7 +226,7 @@ const bySize = (a, b) => { const x = sizeKey(a), y = sizeKey(b); return x[0] - y
 const money = n => '$' + Math.round(n).toLocaleString('en-US');
 const $ = id => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-const api = (path, opts) => fetch(path, opts).then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.error || r.status))));
+const api = (path, opts) => fetch(path, Object.assign({ headers: { 'X-Requested-With': 'net-app' } }, opts)).then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.error || r.status))));
 
 const saved = (() => { try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (e) { return {}; } })();
 const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ cart: state.cart, sort: state.sort })); } catch (e) {} };
@@ -290,20 +291,34 @@ function selectTab(item) {
 }
 
 /* ---------- 分類 ---------- */
-function openSection(kind, id, title) {
+function openSection(kind, id, title, autoStart = true) {
+  clearTimeout(pollTimer);
   state.sec = { kind, id, title };
   state.data = null; state.cat = '全部'; state.sizes = new Set(); state.tw = false; state.pick = {}; state.rendered = 0;
+  state.barSig = ''; state.subsSig = '';
   location.hash = kind + '-' + id;
   renderSubs();
   renderMain();
-  api(`/api/crawl/${kind}/${id}?title=${encodeURIComponent(title)}`, { method: 'POST' })
-    .then(d => { mergeSection(d); poll(); })
+  if (autoStart) startCrawl();
+  else poll();   // 從網址重開：只讀取既有結果，沒抓過的要使用者按按鈕才開始
+}
+function startCrawl(refresh) {
+  const { kind, id, title } = state.sec;
+  api(`/api/crawl/${kind}/${id}?title=${encodeURIComponent(title)}` + (refresh ? '&refresh=1' : ''), { method: 'POST' })
+    .then(d => { mergeSection(d, true); poll(); })
     .catch(e => showBanner('無法開始抓取：' + e.message));
 }
-function mergeSection(d) {
-  if (!state.sec || d.key !== secKey(state.sec.kind, state.sec.id)) return;
-  if (!state.data || d.from === 0) state.data = Object.assign({}, d, { cards: d.cards.slice() });
-  else { const cards = state.data.cards.concat(d.cards); state.data = Object.assign({}, d, { cards }); }
+function mergeSection(d, replace) {
+  if (!state.sec || d.key !== secKey(state.sec.kind, state.sec.id)) return;   // 舊分類的遲到回應
+  const have = state.data ? state.data.cards.length : 0;
+  if (replace || !state.data) {
+    // 重新開始（或第一次）：從頭接；若回應不是從 0 開始，只收狀態、卡片下次輪詢補齊
+    state.data = Object.assign({}, d, { cards: d.from === 0 ? d.cards.slice() : [] });
+  } else if (d.from === have) {
+    state.data = Object.assign({}, d, { cards: state.data.cards.concat(d.cards) });
+  } else {
+    return;   // 位移對不上（例如快速切換分類造成的過期回應），丟掉，下次輪詢會用正確位移
+  }
   renderMain();
 }
 let pollTimer;
@@ -312,8 +327,13 @@ function poll() {
   if (!state.sec) return;
   const { kind, id } = state.sec;
   const from = state.data ? state.data.cards.length : 0;
+  const key = secKey(kind, id);
   api(`/api/section/${kind}/${id}?from=${from}`).then(d => {
-    if (d.status !== 'idle') mergeSection(d);
+    if (!state.sec || secKey(state.sec.kind, state.sec.id) !== key) return;   // 已切換到別的分類
+    if (d.status === 'idle') { state.data = null; state.idle = true; renderMain(); return; }
+    state.idle = false;
+    if (d.from === 0 && d.cards.length < (state.data ? state.data.cards.length : 0)) mergeSection(d, true);  // 伺服器重新開始了
+    else mergeSection(d);
     if (['queued', 'running'].includes(d.status)) pollTimer = setTimeout(poll, 2000);
   }).catch(() => { pollTimer = setTimeout(poll, 5000); });
 }
@@ -343,7 +363,16 @@ function renderMain() {
     const w = el('section', 'welcome');
     w.append(el('h1', null, '從上方目錄選一個分類'),
       el('p', null, '點了才開始抓。每款商品都先確認產地（排除' + (CONFIG.exclude || []).join('、') + '）和庫存，只有確定有貨的顏色、尺寸才會出現。'),
-      el('p', null, '抓取在背景進行，商品會陸續出現；同一分類 6 小時內再開會直接用已抓的資料。'));
+      el('p', null, '抓取在背景進行，商品會陸續出現。已抓過的分類直接顯示上次結果（超過 ' + (CONFIG.stock_hours || 6) + ' 小時會自動重抓）；按「重新抓庫存」可立即更新。'));
+    main.append(w);
+    return;
+  }
+  if (state.idle && !state.data) {   // 從網址重開、還沒抓過：等使用者按
+    main.textContent = ''; main.dataset.key = '';
+    const w = el('section', 'welcome');
+    const b = el('button', 'pill', '開始抓取這個分類'); b.type = 'button';
+    b.onclick = () => { state.idle = false; renderMain(); startCrawl(); };
+    w.append(el('h1', null, state.sec.title), el('p', null, '這個分類還沒抓過（或程式重開過）。按下按鈕才會開始抓取。'), b);
     main.append(w);
     return;
   }
@@ -373,20 +402,21 @@ function renderFacts() {
   if (d.total) add(`${d.checked}/${d.total}`, '款已檢查');
   if (d.excluded_origin) add(d.excluded_origin, '款排除（產地）');
   if (d.excluded_stock) add(d.excluded_stock, '款沒庫存');
+  if (d.failed) add(d.failed, '款讀取失敗（已略過）');
   if (d.promo) f.append(el('span', null, d.promo));
   const a = el('a', null, '在 NET 打開'); a.href = d.url; a.target = '_blank'; a.rel = 'noopener'; f.append(a);
   if (d.status === 'done' || d.status === 'error') {
     const r = el('button', 'link', '重新抓庫存'); r.type = 'button';
-    r.onclick = () => {
-      state.data = null; state.rendered = 0; renderMain();
-      api(`/api/crawl/${state.sec.kind}/${state.sec.id}?refresh=1&title=${encodeURIComponent(state.sec.title)}`, { method: 'POST' })
-        .then(d2 => { mergeSection(d2); poll(); });
-    };
+    r.onclick = () => { clearTimeout(pollTimer); state.data = null; state.rendered = 0; state.barSig = ''; renderMain(); startCrawl(true); };
     f.append(r);
   }
 }
-function renderBar() {
-  const bar = $('bar'), d = state.data; bar.textContent = '';
+function renderBar(force) {
+  const bar = $('bar'), d = state.data;
+  const sig = d ? JSON.stringify([d.cards.length, d.status, state.cat, [...state.sizes], state.sort, state.tw]) : '';
+  if (!force && sig === state.barSig) return;
+  state.barSig = sig;
+  bar.textContent = '';
   if (!d || !d.cards.length) { bar.hidden = true; return; }
   bar.hidden = false;
   const counts = {};
@@ -397,7 +427,7 @@ function renderBar() {
     const b = el('button', 'pill', c); b.type = 'button';
     b.append(el('span', 'n', c === '全部' ? d.cards.length : counts[c]));
     b.setAttribute('aria-pressed', state.cat === c);
-    b.onclick = () => { state.cat = c; state.pick = {}; state.rendered = 0; renderBar(); renderGrid(); };
+    b.onclick = () => { state.cat = c; state.pick = {}; state.rendered = 0; renderBar(true); renderGrid(); };
     cats.append(b);
   });
   row('分類', cats);
@@ -405,7 +435,7 @@ function renderBar() {
   [...new Set(d.cards.flatMap(st => st.colors.flatMap(c => c.sizes)))].sort(bySize).forEach(s => {
     const b = el('button', 'pill size', s); b.type = 'button';
     b.setAttribute('aria-pressed', state.sizes.has(s));
-    b.onclick = () => { state.sizes.has(s) ? state.sizes.delete(s) : state.sizes.add(s); state.pick = {}; state.rendered = 0; renderBar(); renderGrid(); };
+    b.onclick = () => { state.sizes.has(s) ? state.sizes.delete(s) : state.sizes.add(s); state.pick = {}; state.rendered = 0; renderBar(true); renderGrid(); };
     sz.append(b);
   });
   row('尺寸', sz);
@@ -413,11 +443,11 @@ function renderBar() {
   [['site', '網站順序'], ['price', '價格 低 → 高'], ['price-desc', '價格 高 → 低'], ['sizes', '尺寸最齊全']]
     .forEach(([v, t]) => { const o = el('option', null, t); o.value = v; sel.append(o); });
   sel.value = state.sort;
-  sel.onchange = () => { state.sort = sel.value; save(); state.rendered = 0; renderGrid(); renderBar(); };
+  sel.onchange = () => { state.sort = sel.value; save(); state.rendered = 0; renderGrid(); renderBar(true); };
   const r = row('排序', sel);
   if (d.cards.some(st => st.origin === '台灣')) {
     const tw = el('button', 'pill', '只看台灣製'); tw.type = 'button'; tw.setAttribute('aria-pressed', state.tw);
-    tw.onclick = () => { state.tw = !state.tw; state.rendered = 0; renderBar(); renderGrid(); };
+    tw.onclick = () => { state.tw = !state.tw; state.rendered = 0; renderBar(true); renderGrid(); };
     r.append(tw);
   }
   if (state.sort !== 'site' && ['queued', 'running'].includes(d.status)) r.append(el('span', 'hint', '還在抓取，只排序已載入的商品'));
@@ -435,16 +465,22 @@ function renderGrid() {
   state.rendered = list.length;
 }
 function renderTail() {
-  const tail = $('tail'), d = state.data; tail.textContent = ''; tail.className = 'tail';
+  const tail = $('tail'), d = state.data;
   if (!d || ['queued', 'running'].includes(d.status)) {
-    tail.append(document.getElementById('loader-tpl').content.cloneNode(true));
-    const msg = el('div');
+    // 動畫節點保留，只換文字，輪詢時動畫才不會一直重來
+    if (!tail.querySelector('.loader')) {
+      tail.textContent = ''; tail.className = 'tail';
+      tail.append(document.getElementById('loader-tpl').content.cloneNode(true), el('div', 'msg'), el('div', 'sub'));
+    }
+    const msg = tail.querySelector('.msg'); msg.textContent = '';
     if (!d || d.status === 'queued') msg.textContent = '排隊中，前一個分類抓完就開始';
     else if (!d.total) msg.textContent = '資料抓取中・讀取商品列表…';
     else { msg.append(document.createTextNode('資料抓取中・已檢查 '), el('b', null, `${d.checked}/${d.total}`), document.createTextNode(' 款')); }
-    tail.append(msg);
-    if (d && d.status === 'running') tail.append(el('div', null, '一次只發一個請求、每 3～6 秒一次，避免被網站封鎖'));
-  } else if (d.status === 'done') {
+    tail.querySelector('.sub').textContent = d && d.status === 'running' ? '一次只發一個請求、每 3～6 秒一次，避免被網站封鎖' : '';
+    return;
+  }
+  tail.textContent = ''; tail.className = 'tail';
+  if (d.status === 'done') {
     tail.classList.add('done');
     tail.append(el('div', null, d.cards.length ? `已全部載入・共 ${d.cards.length} 款` : '這個分類目前沒有符合條件、有庫存的商品'));
   } else if (d.status === 'error') {
@@ -608,7 +644,8 @@ function pollStatus() {
     showBanner(s.blocked ? '網站拒絕了請求，已停止所有抓取以免被封鎖。請稍後關掉程式再重開。（' + s.blocked + '）' : '');
     const q = s.current ? `抓取中：${(s.sections[s.current] || {}).title || s.current}` + (s.queue.length ? `，排隊 ${s.queue.length}` : '') : '';
     $('queue').textContent = q;
-    renderSubs();
+    const sig = JSON.stringify(Object.entries(s.sections).map(([k, v]) => [k, v.status, v.shown]));
+    if (sig !== state.subsSig) { state.subsSig = sig; renderSubs(); }
   }).catch(() => showBanner('連不到本機程式，請確認 net_app.py 還在執行。'))
     .finally(() => setTimeout(pollStatus, 4000));
 }
@@ -622,7 +659,7 @@ api('/api/menu').then(r => {
   if (m) {
     const top = state.menu.find(t => t.kind === m[1] && t.id === m[2]);
     if (top) selectTab(top);
-    openSection(m[1], m[2], top ? top.title : m[1] + '/' + m[2]);
+    openSection(m[1], m[2], top ? top.title : m[1] + '/' + m[2], false);
   }
 }).catch(e => showBanner('讀取目錄失敗：' + e.message));
 pollStatus();

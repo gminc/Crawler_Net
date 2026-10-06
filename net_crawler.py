@@ -46,7 +46,11 @@ log = logging.getLogger('net_crawler')
 
 
 class BlockedError(RuntimeError):
-    """對方開始拒絕我們（403 / 連續失敗），應立即停止。"""
+    """對方開始拒絕我們（403）或達到請求上限，應立即停止所有請求。"""
+
+
+class TemporaryError(RuntimeError):
+    """連線一直失敗（網路不穩、對方暫時沒回應），重試後仍不行。不代表被封鎖。"""
 
 
 class PoliteClient:
@@ -149,7 +153,7 @@ class PoliteClient:
             r.raise_for_status()
             return r
 
-        raise BlockedError(f'重試 {self.max_retries} 次仍失敗，停止：{url}')
+        raise TemporaryError(f'重試 {self.max_retries} 次仍失敗：{url}')
 
 
 def _retry_after(response):
@@ -333,7 +337,11 @@ def crawl(client, targets, max_pages, name_keywords, exclude_origins, rows,
             seen.add(link)
             if list_name and not name_matches(list_name, name_keywords):
                 continue  # 列表上的品名就不符合，不必抓產品頁
-            _, html = client.get(link, use_cache=True)
+            try:
+                _, html = client.get(link, use_cache=True)
+            except requests.HTTPError as e:  # 商品下架（404 等）：跳過這件，不中斷整批
+                log.warning('商品頁讀取失敗（%s），略過：%s', e, link)
+                continue
             item = parse_product_page(html)
             if not item['name']:
                 log.warning('解析不到品名（網站版面可能改了）：%s', link)
@@ -417,7 +425,7 @@ def main(argv=None):
         try:
             for url, text in discover(client, args.keyword).items():
                 print(f'{url}\t{text}')
-        except BlockedError as e:
+        except (BlockedError, TemporaryError) as e:
             log.error(str(e))
             return 2
         return 0
@@ -426,7 +434,7 @@ def main(argv=None):
     try:
         crawl(client, args.targets, args.max_pages,
               args.name_keyword, args.exclude_origin, rows, args.in_stock_only, args.all_colors)
-    except BlockedError as e:
+    except (BlockedError, TemporaryError) as e:
         log.error('%s（已抓到的 %d 筆仍會寫出，快取保留，之後重跑可接續）', e, len(rows))
         status = 2
     write_csv(rows, args.output)

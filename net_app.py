@@ -33,6 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 
 import net_crawler as nc
@@ -145,10 +146,12 @@ class Section:
         self.status = 'idle'      # idle / queued / running / done / error
         self.message = ''
         self.promo = ''
+        self.refresh = False      # True：這次商品頁一律重抓（使用者按「重新抓庫存」）
         self.total = 0            # 已知款數（讀完列表頁後確定）
         self.checked = 0
         self.excluded_origin = 0
         self.excluded_stock = 0
+        self.failed = 0           # 商品頁讀取失敗（下架、網路不穩）而略過的款數
         self.requests = 0
         self.cards = []
         self.finished_at = None
@@ -166,22 +169,27 @@ class Section:
             'status': self.status, 'message': self.message, 'promo': self.promo,
             'total': self.total, 'checked': self.checked, 'shown': len(self.cards),
             'excluded_origin': self.excluded_origin, 'excluded_stock': self.excluded_stock,
-            'requests': self.requests, 'finished_at': self.finished_at,
+            'failed': self.failed, 'requests': self.requests, 'finished_at': self.finished_at,
             'from': start, 'cards': self.cards[start:],
             'url': f'{nc.BASE_URL}/{self.kind}/{self.id}',
         }
 
 
+class SkipStyle(Exception):
+    """這一款讀不到（下架、網路不穩、版面解析失敗），略過它繼續下一款。"""
+
+
 class Crawler:
     """單一背景執行緒，依點擊順序一次爬一個目錄項目；全程一次只發一個請求。"""
 
-    def __init__(self, client, memory, exclude=DEFAULT_EXCLUDE):
+    def __init__(self, client, memory, exclude=DEFAULT_EXCLUDE, stock_hours=6):
         self.client = client
         self.memory = memory
         self.exclude = exclude
+        self.stock_seconds = stock_hours * 3600
         self.sections = {}
         self.queue = deque()
-        self.lock = threading.RLock()           # 保護 sections / queue
+        self.lock = threading.RLock()           # 保護 sections / queue / current / blocked
         self.net_lock = threading.Lock()        # 確保同一時間只有一個請求
         self.wake = threading.Condition(self.lock)
         self.blocked = ''
@@ -193,14 +201,32 @@ class Crawler:
 
     # ---- 對外 ----
 
+    def block(self, reason):
+        """網站拒絕請求：之後任何請求都不再發出，排隊中的也全部取消。"""
+        with self.lock:
+            if not self.blocked:
+                log.error('已停止所有抓取：%s', reason)
+            self.blocked = self.blocked or str(reason)
+            for s in self.queue:
+                s.status, s.message = 'error', '已停止：網站拒絕請求，請稍後重開程式'
+            self.queue.clear()
+
     def fetch(self, url, use_cache=True):
+        """所有對 NET 的請求都經過這裡：一次一個；被擋之後一律不再發。"""
         with self.net_lock:
+            if self.blocked:
+                raise nc.BlockedError(self.blocked)
             before = self.client.requests_made
             try:
                 return self.client.get(url, use_cache=use_cache)
+            except nc.BlockedError as e:
+                self.block(e)
+                raise
             finally:
-                if self.current:
-                    self.current.requests += self.client.requests_made - before
+                if threading.current_thread() is self._thread:  # 只把背景爬取的請求算進該分類
+                    sec = self.current
+                    if sec is not None:
+                        sec.requests += self.client.requests_made - before
 
     def request(self, kind, target_id, title='', refresh=False):
         with self.lock:
@@ -211,8 +237,11 @@ class Crawler:
                 if sec.status != 'done':
                     sec.status, sec.message = 'error', '已停止：網站拒絕請求，請稍後重開程式'
                 return sec
-            if sec.status in ('idle', 'error') or (refresh and sec.status == 'done'):
+            stale = (sec.status == 'done' and sec.finished_at
+                     and time.time() - sec.finished_at > self.stock_seconds)
+            if sec.status in ('idle', 'error') or stale or (refresh and sec.status == 'done'):
                 sec.reset()
+                sec.refresh = bool(refresh)
                 sec.status = 'queued'
                 self.queue.append(sec)
                 self.wake.notify()
@@ -247,13 +276,8 @@ class Crawler:
                     self._crawl_category(sec)
                 sec.status = 'done'
             except nc.BlockedError as e:
-                log.error('%s', e)
                 sec.status, sec.message = 'error', str(e)
-                with self.lock:
-                    self.blocked = str(e)  # 被擋就全部停，不再發請求
-                    for s in self.queue:
-                        s.status, s.message = 'error', '已停止：網站拒絕請求'
-                    self.queue.clear()
+                self.block(e)
             except Exception as e:  # 單一分類失敗不影響其他分類
                 log.exception('爬取 %s 失敗', sec.key)
                 sec.status, sec.message = 'error', f'{type(e).__name__}: {e}'
@@ -261,15 +285,20 @@ class Crawler:
                 sec.finished_at = time.time()
                 with self.lock:
                     self.current = None
-                log.info('%s %s：顯示 %d 款／檢查 %d 款，排除產地 %d、沒庫存 %d，請求 %d 次',
-                         sec.key, sec.status, len(sec.cards), sec.checked,
-                         sec.excluded_origin, sec.excluded_stock, sec.requests)
+                log.info('%s %s：顯示 %d 款／檢查 %d 款，排除產地 %d、沒庫存 %d、讀取失敗 %d，請求 %d 次',
+                         sec.key, sec.status, len(sec.cards), sec.checked, sec.excluded_origin,
+                         sec.excluded_stock, sec.failed, sec.requests)
 
     def _listing(self, sec):
         """讀完所有列表頁（每頁 1 請求），依品名分組；同名 = 同一款的不同顏色。"""
         first_url, html = self.fetch(nc.page_url(sec.kind, sec.id), use_cache=False)
+        if urlparse(first_url).path in ('', '/'):
+            raise RuntimeError('這個分類已不存在（被導回首頁）')
         products, last_page, title = nc.parse_listing(sec.kind, html, first_url)
-        sec.promo = title if sec.kind == 'promotion' else ''
+        if sec.kind == 'promotion':
+            sec.promo = title
+            if products and not any('sizes' in p[3] for p in products):
+                raise RuntimeError('讀不到活動頁的庫存資料（網站版面可能改了）')
         for page in range(2, (last_page or 1) + 1):
             url, html = self.fetch(nc.page_url(sec.kind, sec.id, page), use_cache=False)
             products += nc.parse_listing(sec.kind, html, url)[0]
@@ -278,20 +307,31 @@ class Crawler:
         for p in products:
             if p[0] not in seen:
                 seen.add(p[0])
-                styles.setdefault(p[2], []).append(p)
+                # 列表上沒有品名時，用連結當作獨立一款，避免把不同商品混在一起
+                styles.setdefault(p[2] or p[0], []).append(p)
         sec.total = len(styles)
         return styles
 
     def _known_excluded(self, name):
-        origin = self.memory.get(name)
+        origin = self.memory.get(name) if name else None
         return origin is not None and is_excluded(origin, self.exclude)
 
-    def _product(self, link, name):
-        _, html = self.fetch(link)
+    def _product(self, sec, link):
+        """抓商品頁；讀不到或解析不到品名就 SkipStyle。被擋（BlockedError）則往上拋，整個停止。"""
+        try:
+            _, html = self.fetch(link, use_cache=not sec.refresh)
+        except (requests.RequestException, nc.TemporaryError) as e:
+            log.warning('商品頁讀取失敗（%s），略過：%s', e, link)
+            raise SkipStyle()
         item = nc.parse_product_page(html)
-        if item['name']:
-            self.memory.set(name, item['origin'])
+        if not item['name']:
+            log.warning('解析不到品名，略過：%s', link)
+            raise SkipStyle()
         return item
+
+    def _remember(self, name, item):
+        if name and not name.startswith('http'):
+            self.memory.set(name, item['origin'])
 
     def _card(self, name, origin, colors, promo=''):
         return {'name': name, 'cat': guess_category(name), 'origin': origin.replace('製', ''),
@@ -310,10 +350,16 @@ class Crawler:
                     if link in done:
                         continue
                     done.add(link)
-                    item = self._product(link, name)
-                    if not item['name']:
-                        continue
-                    origin = item['origin']
+                    try:
+                        item = self._product(sec, link)
+                    except SkipStyle:
+                        if origin is None:               # 第一個顏色就讀不到：整款略過
+                            raise
+                        continue                         # 其他顏色讀不到（例如下架）：略過這個顏色
+                    if origin is None:
+                        origin = item['origin']
+                        name = name if not name.startswith('http') else item['name']
+                        self._remember(name, item)
                     if is_excluded(origin, self.exclude):  # 一發現中國製就停，不再抓其他顏色
                         break
                     todo += [(c, '') for c in item['color_links'] if c not in done]
@@ -323,14 +369,14 @@ class Crawler:
                         colors.append({'code': code, 'color': color, 'sizes': item['sizes'].split('/'),
                                        'price': price, 'orig': to_int(item['original_price']) or price,
                                        'link': link, 'img': img or urljoin(link, item['main_img'])})
-                if origin is None:                          # 商品頁解析失敗，略過
-                    continue
                 if is_excluded(origin, self.exclude):
                     sec.excluded_origin += 1
                 elif colors:
                     sec.cards.append(self._card(name, origin, colors))
                 else:
                     sec.excluded_stock += 1
+            except SkipStyle:
+                sec.failed += 1
             finally:
                 sec.checked += 1
 
@@ -342,9 +388,11 @@ class Crawler:
                 if not stocked:
                     sec.excluded_stock += 1
                     continue
-                origin = self.memory.get(name)
+                origin = self.memory.get(name) if not name.startswith('http') else None
                 if origin is None:
-                    origin = self._product(stocked[0][0], name)['origin']
+                    item = self._product(sec, stocked[0][0])
+                    origin = item['origin']
+                    self._remember(name, item)
                 if is_excluded(origin, self.exclude):
                     sec.excluded_origin += 1
                     continue
@@ -356,6 +404,8 @@ class Crawler:
                                    'price': price, 'orig': to_int(extra.get('original_price')) or price,
                                    'link': link, 'img': img})
                 sec.cards.append(self._card(name, origin, colors, sec.promo))
+            except SkipStyle:
+                sec.failed += 1
             finally:
                 sec.checked += 1
 
@@ -381,7 +431,7 @@ class App:
         return parse_sidebar(html)
 
     def page(self):
-        config = {'exclude': self.exclude}
+        config = {'exclude': self.exclude, 'stock_hours': self.crawler.stock_seconds / 3600}
         return TEMPLATE.read_text(encoding='utf-8').replace(
             '/*CONFIG*/{}', json.dumps(config, ensure_ascii=False).replace('<', '\\u003c'))
 
@@ -406,12 +456,16 @@ def make_handler(app):
             self._send(status, json.dumps(obj, ensure_ascii=False))
 
         def _local_only(self):
-            # 只接受本機網址，避免其他網站透過瀏覽器偷偷呼叫（DNS rebinding）
-            host = (self.headers.get('Host') or '').split(':')[0]
-            if host not in ('127.0.0.1', 'localhost'):
+            # 只接受本機網址（擋 DNS rebinding）；API 另外要求自訂標頭，其他網站的網頁無法帶上
+            # （跨站請求帶自訂標頭需要 CORS 預檢，本程式不允許），避免別的網站偷偷叫本機程式開始爬
+            host = (self.headers.get('Host') or '').rsplit(':', 1)[0]
+            ok = host in ('127.0.0.1', 'localhost')
+            if ok and self.path.startswith('/api/'):
+                ok = (self.headers.get('X-Requested-With') == 'net-app'
+                      and self.headers.get('Sec-Fetch-Site', 'same-origin') in ('same-origin', 'none'))
+            if not ok:
                 self._send(403, 'forbidden', 'text/plain')
-                return False
-            return True
+            return ok
 
         def do_GET(self):
             if not self._local_only():
@@ -434,8 +488,7 @@ def make_handler(app):
                     return self._json(sec.to_dict(start))
                 if parts == ['api', 'status']:
                     return self._json(app.crawler.status())
-            except nc.BlockedError as e:
-                app.crawler.blocked = str(e)
+            except nc.BlockedError as e:  # fetch() 已經停止所有抓取
                 return self._json({'error': str(e)}, 502)
             except Exception as e:
                 log.exception('處理 %s 失敗', self.path)
@@ -474,7 +527,8 @@ def main(argv=None):
     data_dir = Path(args.data_dir)
     client = nc.PoliteClient(delay=args.delay, jitter=args.jitter, max_requests=args.max_requests,
                              cache_dir=data_dir / 'cache', max_age_hours=args.stock_hours)
-    crawler = Crawler(client, OriginMemory(data_dir / 'origins.sqlite3'), args.exclude_origin)
+    crawler = Crawler(client, OriginMemory(data_dir / 'origins.sqlite3'), args.exclude_origin,
+                      stock_hours=args.stock_hours)
     crawler.start()
     app = App(crawler, args.exclude_origin)
 

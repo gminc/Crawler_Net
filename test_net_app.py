@@ -152,8 +152,10 @@ def server(crawler):
     httpd.shutdown()
 
 
-def call(url, method='GET', host=None):
+def call(url, method='GET', host=None, token=True):
     req = urllib.request.Request(url, method=method)
+    if token:
+        req.add_header('X-Requested-With', 'net-app')
     if host:
         req.add_header('Host', host)
     with urllib.request.urlopen(req, timeout=5) as r:
@@ -177,3 +179,97 @@ def test_rejects_foreign_host(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         call(server + '/api/menu', host='evil.example.com')
     assert e.value.code == 403
+
+
+# ---------- 審查發現的問題（回歸測試） ----------
+
+def test_missing_sibling_or_product_does_not_stop_section(crawler):
+    del crawler.session.pages['/product/2']            # A 款的黑色下架（404）
+    crawler.session.pages['/category/9'] = (200, listing(('6', '下架款'), ('1', '長褲A'), ('5', '短褲C')))
+    sec = run(crawler, 'category', '9')                 # 下架款的商品頁也 404
+    assert [c['name'] for c in sec.cards] == ['長褲A']
+    assert (sec.checked, sec.failed, sec.excluded_stock) == (3, 1, 1)
+
+
+def test_temporary_network_error_skips_without_blocking(crawler, monkeypatch):
+    real_get = crawler.session.get
+
+    def flaky(url, timeout=None):
+        if url.endswith('/product/5'):
+            raise nc.requests.ConnectionError('reset')
+        return real_get(url, timeout)
+    monkeypatch.setattr(crawler.session, 'get', flaky)
+    sec = run(crawler, 'category', '9')
+    assert sec.failed == 1 and not crawler.blocked
+
+
+def test_blocked_by_menu_request_stops_worker_and_further_requests(crawler):
+    app = na.App(crawler, na.DEFAULT_EXCLUDE)
+    crawler.session.pages['/'] = (403, '')
+    with pytest.raises(nc.BlockedError):
+        app.menu()
+    assert crawler.blocked
+    before = len(crawler.session.calls)
+    with pytest.raises(nc.BlockedError):
+        app.submenu('category', '9')
+    assert len(crawler.session.calls) == before        # 被擋之後不再發任何請求
+    assert crawler.request('category', '9').status == 'error'
+
+
+def test_refresh_refetches_product_pages(crawler):
+    run(crawler, 'category', '9')
+    crawler.session.pages['/product/1'] = (200, product('長褲A', '台灣製', '002白色', {'S': 0, 'M': 3},
+                                                        others=['2'], pid='1'))
+    sec = na.Section('category', '9', 't')
+    sec.refresh = True
+    crawler._crawl_category(sec)
+    assert sec.cards[0]['colors'][0]['sizes'] == ['M']  # 不是快取裡舊的 S
+
+
+def test_promotion_unparseable_product_is_not_shown(crawler):
+    crawler.session.pages['/product/11'] = (200, '<html>維護中</html>')
+    sec = run(crawler, 'promotion', '7')
+    assert sec.cards == [] and sec.failed == 1
+
+
+def test_empty_alt_names_are_separate_styles(crawler):
+    crawler.session.pages['/category/9'] = (200, listing(('3', ''), ('1', '')))
+    sec = run(crawler, 'category', '9')
+    assert sec.total == 2 and [c['name'] for c in sec.cards] == ['長褲A']
+    assert crawler.memory.get('') is None
+
+
+def test_stale_done_section_is_recrawled(crawler):
+    sec = crawler.request('category', '9')
+    sec.status, sec.finished_at = 'done', time.time() - 7 * 3600   # 超過 6 小時
+    crawler.queue.clear()
+    assert crawler.request('category', '9').status == 'queued'
+    sec.status, sec.finished_at = 'done', time.time()
+    crawler.queue.clear()
+    assert crawler.request('category', '9').status == 'done'       # 6 小時內直接用
+
+
+def test_removed_category_and_broken_promotion_are_errors(crawler):
+    crawler.session.pages['/category/9'] = (200, '')
+    real_get = crawler.session.get
+
+    def redirect_home(url, timeout=None):
+        r = real_get(url, timeout)
+        if url.endswith('/category/9'):
+            r.url = BASE + '/'
+        return r
+    crawler.session.get = redirect_home
+    with pytest.raises(RuntimeError, match='不存在'):
+        run(crawler, 'category', '9')
+    crawler.session.pages['/promotion/7'] = (200, '<div class="saleGroup_title"></div>'
+                                              '<td><a class="hover-box" href="https://www.net-fashion.net/product/11">'
+                                              '<img alt="背心D" src="x"></a></td>')
+    with pytest.raises(RuntimeError, match='庫存資料'):
+        run(crawler, 'promotion', '7')
+
+
+def test_api_requires_app_header(server):
+    with pytest.raises(urllib.error.HTTPError) as e:
+        call(server + '/api/crawl/category/9', method='POST', token=False)
+    assert e.value.code == 403
+    assert '本機版' in call(server + '/', token=False)   # 網頁本身可以直接開
